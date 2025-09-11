@@ -770,6 +770,34 @@ def clear_jobs():
     DOWNLOADS_STATUS = {}
     return jsonify({'message': 'Historial de trabajos limpiado'})
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Endpoint simple de salud para plataformas de despliegue."""
+    return jsonify({
+        'status': 'ok',
+        'service': 'yt-dlp-music-api',
+        'jobs_active': sum(1 for j in DOWNLOADS_STATUS.values() if j.get('status') in ['iniciando','descargando']),
+        'jobs_total': len(DOWNLOADS_STATUS)
+    })
+
+@app.route('/environment', methods=['GET'])
+def environment_info():
+    """Información sobre el entorno de ejecución y estrategias anti-bloqueo."""
+    remote_indicators = ['RENDER', 'HEROKU', 'RAILWAY_PROJECT_ID', 'VERCEL']
+    is_remote = any(os.environ.get(v) for v in remote_indicators)
+    return jsonify({
+        'environment': 'remote' if is_remote else 'local',
+        'detected_flags': {v: bool(os.environ.get(v)) for v in remote_indicators},
+        'python_version': f"{os.sys.version_info.major}.{os.sys.version_info.minor}.{os.sys.version_info.micro}",
+        'strategies': {
+            'user_agents_rotation': True,
+            'progressive_retries': True,
+            'cookies_env_supported': True,
+            'browser_cookies_local_only': True,
+            'geo_bypass': True
+        }
+    })
+
 if __name__ == '__main__':
     import os
     

@@ -58,6 +58,8 @@ http://localhost:8080
 - `GET /formats` - Formatos disponibles
 - `GET /environment` - Información del entorno y estrategias aplicadas
 - `GET /jobs` - Listar trabajos
+- `GET /health` - Verificar salud del servicio (uptime básico)
+- `GET /environment` - Ver estrategias y entorno detectado
 
 ## 📁 Estructura del Proyecto
 
@@ -80,6 +82,24 @@ Compatible con:
 - Render
 - Heroku
 - Cualquier servidor que soporte Flask
+
+### Producción (Gunicorn)
+Se incluye `Procfile` listo:
+```
+web: gunicorn api_downloader:app -w 4 -b 0.0.0.0:$PORT
+```
+
+### Docker
+Construir y ejecutar:
+```
+docker build -t yt-dlp-music-api .
+docker run -p 8080:8080 yt-dlp-music-api
+```
+
+Endpoint de salud para checks:
+```
+GET /health
+```
 
 ## 🤝 Contribuir
 
