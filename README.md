@@ -81,6 +81,26 @@ Compatible con:
 - Heroku
 - Cualquier servidor que soporte Flask
 
+### Variables de entorno útiles (hosting / anti-bloqueo)
+| Variable | Valor | Propósito |
+|----------|-------|-----------|
+| `FORCE_LOCAL_MODE` | 1 | Emula estrategias locales (incluye intento de cookies sintéticas) en un servidor remoto |
+| `FORCE_REMOTE_MODE` | 1 | Fuerza estrategias de entorno remoto aun estando en local |
+| `USE_FAKE_CONSENT_COOKIE` | 1 (default) | Crea cookie CONSENT/PREF sintética si no hay cookies reales |
+| `YOUTUBE_COOKIES` | (texto) | Cookies exportadas reales para alta tasa de éxito |
+
+Ejemplo rápido (Render / Railway sin cookies reales):
+```bash
+FORCE_LOCAL_MODE=1
+USE_FAKE_CONSENT_COOKIE=1
+```
+Esto activa: user-agents rotativos + cliente web local + cookie sintética mínima para evitar algunos bloqueos.
+
+Para máxima efectividad añade también:
+```bash
+YOUTUBE_COOKIES="(contenido de tu cookies.txt)"
+```
+
 ## 🤝 Contribuir
 
 1. Fork el proyecto

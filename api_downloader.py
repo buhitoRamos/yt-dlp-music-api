@@ -177,6 +177,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             'render.com' in os.environ.get('HOSTNAME', ''),
             'heroku.com' in os.environ.get('HOSTNAME', '')
         ])
+
+        # Overrides manuales para emular entorno (solución rápida en hosting)
+        if os.environ.get('FORCE_LOCAL_MODE') == '1' or os.environ.get('FORCE_LOCAL_STRATEGIES') == '1':
+            DOWNLOADS_STATUS[job_id]['force_mode'] = 'local_emulation'
+            is_remote_server = False
+        elif os.environ.get('FORCE_REMOTE_MODE') == '1':
+            DOWNLOADS_STATUS[job_id]['force_mode'] = 'remote_forced'
+            is_remote_server = True
         
         # Log del entorno detectado
         DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server' if is_remote_server else 'local_dev'
@@ -283,6 +291,23 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 DOWNLOADS_STATUS[job_id]['info'] = 'Usando estrategias anti-bot básicas (sin cookies disponibles)'
         elif not cookies_added and is_remote_server:
             DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot avanzadas sin cookies'
+            # Si se forzó modo local pero seguimos sin cookies, intentar cookie sintética mínima
+            if os.environ.get('FORCE_LOCAL_MODE') == '1' and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
+                try:
+                    import tempfile
+                    fake_cookie_content = """# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	TRUE	2147483647	CONSENT	YES+cb
+.youtube.com	TRUE	/	TRUE	2147483647	PREF	f1=50000000&tz=UTC
+"""
+                    fake_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                    fake_file.write(fake_cookie_content)
+                    fake_file.close()
+                    temp_cookies_path = fake_file.name
+                    cmd.extend(['--cookies', temp_cookies_path])
+                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica_minima'
+                    DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookie sintética CONSENT (emulación local)'
+                except Exception as e:
+                    DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
         else:
             DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies manuales + estrategias anti-bot'
         
