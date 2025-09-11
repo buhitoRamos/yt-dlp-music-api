@@ -173,21 +173,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             '--referer', 'https://www.youtube.com/',
             '--sleep-interval', '2',
             '--max-sleep-interval', '5',
-            '--sleep-subtitles', '2',
-            '--extractor-args', 'youtube:player_client=web,mweb,tv',
-            '--extractor-args', 'youtube:skip=dash,hls',
-            '--extractor-args', 'youtube:player_skip=webpage,configs',
+            '--extractor-args', 'youtube:player_client=web',
             '--no-warnings',
             '--ignore-errors',
             '--no-abort-on-error',
-            '--retry-sleep', '3',
             '--socket-timeout', '60',
-            '--fragment-retries', '15',
-            '--retries', '15',
-            '--force-ipv4',
-            '--no-cache-dir',
-            '--throttled-rate', '100K',
-            '--extract-flat'
+            '--fragment-retries', '10',
+            '--retries', '10'
         ]
         cmd.extend(anti_429_options)
         
@@ -262,7 +254,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Intentar descarga con estrategias múltiples y más agresivas
         success = False
         attempt = 1
-        max_attempts = 5  # Aumentamos a 5 intentos
+        max_attempts = 3  # Reducimos a 3 para evitar problemas
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
@@ -271,36 +263,18 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Estrategias adicionales para intentos posteriores
                 cmd_retry = cmd.copy()
                 
-                # Remover extract-flat para intentos posteriores
-                if '--extract-flat' in cmd_retry:
-                    cmd_retry.remove('--extract-flat')
-                
                 if attempt == 2:
-                    # Segundo intento: usar cliente móvil con más delays
+                    # Segundo intento: usar cliente móvil
                     cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
-                    cmd_retry.extend(['--sleep-interval', '5'])
+                    # Cambiar user agent
+                    new_ua = get_random_user_agent()
+                    for i, arg in enumerate(cmd_retry):
+                        if arg == '--user-agent' and i + 1 < len(cmd_retry):
+                            cmd_retry[i + 1] = new_ua
+                            break
                 elif attempt == 3:
-                    # Tercer intento: usar cliente de TV
+                    # Tercer intento: cliente TV con cookies si están disponibles
                     cmd_retry.extend(['--extractor-args', 'youtube:player_client=tv'])
-                    cmd_retry.extend(['--sleep-interval', '8'])
-                elif attempt == 4:
-                    # Cuarto intento: estrategia más conservadora
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=web'])
-                    cmd_retry.extend(['--sleep-interval', '10'])
-                    cmd_retry.extend(['--throttled-rate', '50K'])
-                elif attempt == 5:
-                    # Último intento: máxima precaución + cookies del navegador si es posible
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
-                    cmd_retry.extend(['--sleep-interval', '15'])
-                    cmd_retry.extend(['--throttled-rate', '25K'])
-                    
-                    # Intentar usar cookies del navegador como último recurso
-                    try:
-                        cmd_retry.extend(['--cookies-from-browser', 'chrome'])
-                        DOWNLOADS_STATUS[job_id]['info'] = 'Último intento: usando cookies del navegador'
-                    except:
-                        DOWNLOADS_STATUS[job_id]['info'] = 'Último intento: sin cookies del navegador'
-                    
                     # Cambiar user agent
                     new_ua = get_random_user_agent()
                     for i, arg in enumerate(cmd_retry):
@@ -309,7 +283,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             break
                 
                 # Agregar delay progresivo entre intentos
-                delay = random.randint(5 + (attempt * 3), 10 + (attempt * 5))
+                delay = random.randint(3 + attempt, 8 + attempt)
                 DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
                 time.sleep(delay)
                 cmd = cmd_retry
