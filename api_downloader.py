@@ -165,7 +165,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
         
-        # Estrategias anti-429 progresivas según el entorno
+        # Estrategias anti-bot progresivas según el entorno
         random_ua = get_random_user_agent()
         
         # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
@@ -178,47 +178,71 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             'heroku.com' in os.environ.get('HOSTNAME', '')
         ])
         
+        # Log del entorno detectado
+        DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server' if is_remote_server else 'local_dev'
+        
         if is_remote_server:
             # Estrategias más agresivas para servidores remotos
             anti_429_options = [
                 '--no-check-certificate',
                 '--user-agent', random_ua,
                 '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '2',
-                '--max-sleep-interval', '10',
+                '--sleep-interval', '3',
+                '--max-sleep-interval', '12',
                 '--extractor-args', 'youtube:player_client=web',
-                '--extractor-args', 'youtube:skip=dash',
+                '--extractor-args', 'youtube:skip=dash,hls',
                 '--no-warnings',
                 '--ignore-errors',
                 '--socket-timeout', '90',
-                '--fragment-retries', '20',
-                '--retries', '20',
-                '--throttled-rate', '50K'
+                '--fragment-retries', '25',
+                '--retries', '25',
+                '--throttled-rate', '50K',
+                '--geo-bypass',
+                '--geo-bypass-country', 'US'
             ]
-            DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server'
+            DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'server_aggressive'
         else:
-            # Estrategias normales para desarrollo local
+            # Estrategias normales para desarrollo local + cookies automáticas
             anti_429_options = [
                 '--no-check-certificate',
                 '--user-agent', random_ua,
                 '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '1',
-                '--max-sleep-interval', '3',
+                '--sleep-interval', '2',
+                '--max-sleep-interval', '5',
                 '--extractor-args', 'youtube:player_client=web',
                 '--no-warnings',
                 '--ignore-errors',
                 '--socket-timeout', '60',
-                '--fragment-retries', '10',
-                '--retries', '10'
+                '--fragment-retries', '15',
+                '--retries', '15'
             ]
-            DOWNLOADS_STATUS[job_id]['environment'] = 'local_dev'
+            
+            # En local, intentar cookies del navegador automáticamente
+            browser_cookies_added = False
+            for browser in ['chrome', 'firefox', 'safari', 'edge']:
+                try:
+                    # Intentar obtener cookies del navegador especificado
+                    test_cmd = ['python3', '-m', 'yt_dlp', '--cookies-from-browser', browser, '--simulate', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']
+                    test_process = subprocess.run(test_cmd, capture_output=True, timeout=10)
+                    if test_process.returncode == 0:
+                        anti_429_options.extend(['--cookies-from-browser', browser])
+                        DOWNLOADS_STATUS[job_id]['auto_cookies'] = f'Usando cookies de {browser}'
+                        browser_cookies_added = True
+                        break
+                except:
+                    continue
+            
+            if browser_cookies_added:
+                DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_with_browser_cookies'
+            else:
+                DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
         
         cmd.extend(anti_429_options)
         
         # Log del user agent usado
         DOWNLOADS_STATUS[job_id]['user_agent'] = random_ua
         
-        # Agregar cookies si están disponibles (opcional)
+        # Agregar cookies si están disponibles (prioridad alta para evitar verificación de bot)
         cookies_added = False
         temp_cookies_path = None
         
@@ -249,11 +273,18 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_path}'
                     cookies_added = True
         
-        # Mensaje informativo sobre cookies
-        if not cookies_added:
-            DOWNLOADS_STATUS[job_id]['info'] = 'Usando estrategias anti-429 sin cookies'
+        # Opción 3: Si no hay cookies explícitas y estamos en local, ya se intentaron las cookies del navegador arriba
+        
+        # Mensaje informativo sobre cookies y nivel anti-bot
+        if not cookies_added and not is_remote_server:
+            if 'auto_cookies' in DOWNLOADS_STATUS[job_id]:
+                DOWNLOADS_STATUS[job_id]['info'] = f'Usando cookies automáticas + estrategias anti-bot'
+            else:
+                DOWNLOADS_STATUS[job_id]['info'] = 'Usando estrategias anti-bot básicas (sin cookies disponibles)'
+        elif not cookies_added and is_remote_server:
+            DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot avanzadas sin cookies'
         else:
-            DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies + estrategias anti-429'
+            DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies manuales + estrategias anti-bot'
         
         # Configurar formato
         if format_type == 'mp3':
@@ -281,29 +312,91 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         
         cmd.append(url)
         
-        # Ejecutar comando con manejo de errores 429
+        # Ejecutar comando con manejo de errores específicos
         DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
         
-        # Intentar descarga con estrategias adaptadas al entorno
+        # Intentar descarga con estrategias adaptadas al entorno y tipo de error
         success = False
         attempt = 1
-        max_attempts = 5 if is_remote_server else 3
+        max_attempts = 6 if is_remote_server else 4  # Más intentos para errores de bot
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
             
             if attempt > 1:
-                # Crear comando modificado para reintentos
+                # Crear comando modificado para reintentos específicos anti-bot
                 cmd_retry = ['python3', '-m', 'yt_dlp']
                 
                 # Calcular sleep intervals progresivos (asegurar que max > min)
-                base_sleep = 2 if is_remote_server else 1
+                base_sleep = 3 if is_remote_server else 2
                 min_sleep = base_sleep + (attempt - 1) * 2
-                max_sleep = min_sleep + 8
+                max_sleep = min_sleep + 10
                 
                 new_ua = get_random_user_agent()
                 
                 if is_remote_server:
+                    retry_options = [
+                        '--no-check-certificate',
+                        '--user-agent', new_ua,
+                        '--referer', 'https://www.youtube.com/',
+                        '--sleep-interval', str(min_sleep),
+                        '--max-sleep-interval', str(max_sleep),
+                        '--no-warnings',
+                        '--ignore-errors',
+                        '--socket-timeout', '120',
+                        '--fragment-retries', '30',
+                        '--retries', '30',
+                        '--geo-bypass',
+                        '--geo-bypass-country', 'US'
+                    ]
+                    
+                    # Estrategias específicas por intento para servidores
+                    if attempt == 2:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=mweb',
+                            '--throttled-rate', '40K'
+                        ])
+                    elif attempt == 3:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=tv',
+                            '--extractor-args', 'youtube:skip=dash,hls',
+                            '--throttled-rate', '30K'
+                        ])
+                    elif attempt == 4:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=web',
+                            '--extractor-args', 'youtube:skip=dash',
+                            '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com',
+                            '--throttled-rate', '20K'
+                        ])
+                    elif attempt == 5:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=tv_embedded',
+                            '--extractor-args', 'youtube:player_skip=configs',
+                            '--throttled-rate', '15K'
+                        ])
+                    elif attempt == 6:
+                        # Último recurso: estrategia máxima anti-bot
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=mediaconnect',
+                            '--add-header', 'X-YouTube-Client-Name:3',
+                            '--add-header', 'X-YouTube-Client-Version:17.31.35',
+                            '--throttled-rate', '10K'
+                        ])
+                        
+                        # Intentar cookies de entorno si están disponibles
+                        if os.environ.get('YOUTUBE_COOKIES'):
+                            try:
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                    temp_cookies_path = f.name
+                                retry_options.extend(['--cookies', temp_cookies_path])
+                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_final_attempt'
+                            except Exception as e:
+                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                else:
+                    # Estrategias para entorno local con cookies automáticas
                     retry_options = [
                         '--no-check-certificate',
                         '--user-agent', new_ua,
@@ -317,94 +410,50 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                         '--retries', '20'
                     ]
                     
-                    # Estrategias específicas por intento
+                    # Estrategias específicas por intento para local
                     if attempt == 2:
                         retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=mweb',
-                            '--throttled-rate', '30K'
+                            '--extractor-args', 'youtube:player_client=mweb'
                         ])
+                        # Intentar cookies de Chrome específicamente
+                        try:
+                            retry_options.extend(['--cookies-from-browser', 'chrome'])
+                            DOWNLOADS_STATUS[job_id]['cookies_attempt'] = 'chrome_attempt2'
+                        except:
+                            pass
                     elif attempt == 3:
                         retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=tv',
-                            '--throttled-rate', '20K'
+                            '--extractor-args', 'youtube:player_client=tv'
                         ])
-                        # En servidores remotos, agregar estrategias adicionales para el intento 3
-                        if is_remote_server:
-                            retry_options.extend([
-                                '--geo-bypass',
-                                '--extractor-args', 'youtube:player_skip=configs',
-                                '--no-check-certificate',
-                                '--force-ipv4'
-                            ])
+                        # Intentar cookies de Firefox
+                        try:
+                            retry_options.extend(['--cookies-from-browser', 'firefox'])
+                            DOWNLOADS_STATUS[job_id]['cookies_attempt'] = 'firefox_attempt3'
+                        except:
+                            pass
                     elif attempt == 4:
+                        # Último recurso local: múltiples opciones
                         retry_options.extend([
                             '--extractor-args', 'youtube:player_client=web',
-                            '--extractor-args', 'youtube:skip=dash',
-                            '--throttled-rate', '15K'
+                            '--extractor-args', 'youtube:skip=dash'
                         ])
-                        # Intentar cookies del navegador en el cuarto intento (solo si no estamos en servidor remoto)
-                        if not os.environ.get('YOUTUBE_COOKIES') and not is_remote_server:
+                        
+                        # Intentar todos los navegadores disponibles
+                        cookies_found = False
+                        for browser in ['safari', 'edge', 'brave', 'opera']:
                             try:
-                                retry_options.extend(['--cookies-from-browser', 'chrome'])
-                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'browser_chrome_attempt4'
+                                retry_options.extend(['--cookies-from-browser', browser])
+                                DOWNLOADS_STATUS[job_id]['cookies_attempt'] = f'{browser}_attempt4'
+                                cookies_found = True
+                                break
                             except:
-                                DOWNLOADS_STATUS[job_id]['cookies_note'] = 'Chrome cookies not available locally'
-                    elif attempt == 5:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=mweb',
-                            '--throttled-rate', '10K'
-                        ])
-                        # Último recurso: intentar múltiples opciones de cookies
-                        cookies_tried = False
+                                continue
                         
-                        # 1. Intentar cookies de variable de entorno
-                        if os.environ.get('YOUTUBE_COOKIES'):
-                            try:
-                                import tempfile
-                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
-                                    temp_cookies_path = f.name
-                                retry_options.extend(['--cookies', temp_cookies_path])
-                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_variable'
-                                cookies_tried = True
-                            except Exception as e:
-                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
-                        
-                        # 2. Si no hay cookies de entorno y no estamos en servidor remoto, intentar cookies del navegador
-                        if not cookies_tried and not is_remote_server:
-                            for browser in ['chrome', 'firefox', 'safari', 'edge']:
-                                try:
-                                    retry_options.extend(['--cookies-from-browser', browser])
-                                    DOWNLOADS_STATUS[job_id]['cookies_used'] = f'browser_{browser}'
-                                    cookies_tried = True
-                                    break
-                                except:
-                                    continue
-                        
-                        # 3. Si estamos en servidor remoto, usar estrategias alternativas más agresivas
-                        if not cookies_tried and is_remote_server:
-                            # Estrategias adicionales para servidores remotos sin navegadores
-                            retry_options.extend([
-                                '--extractor-args', 'youtube:player_skip=configs',
-                                '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com',
-                                '--geo-bypass',
-                                '--no-check-certificate'
-                            ])
-                            DOWNLOADS_STATUS[job_id]['fallback_strategy'] = 'remote_server_bypass'
-                else:
-                    retry_options = [
-                        '--no-check-certificate',
-                        '--user-agent', new_ua,
-                        '--referer', 'https://www.youtube.com/',
-                        '--sleep-interval', str(min_sleep),
-                        '--max-sleep-interval', str(max_sleep),
-                        '--extractor-args', 'youtube:player_client=web',
-                        '--no-warnings',
-                        '--ignore-errors',
-                        '--socket-timeout', '60',
-                        '--fragment-retries', '10',
-                        '--retries', '10'
-                    ]
+                        if not cookies_found and cookies_file:
+                            # Intentar archivo de cookies si se especificó
+                            if os.path.exists(cookies_file):
+                                retry_options.extend(['--cookies', cookies_file])
+                                DOWNLOADS_STATUS[job_id]['cookies_attempt'] = 'file_attempt4'
                 
                 cmd_retry.extend(retry_options)
                 
@@ -453,18 +502,51 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             if process.returncode == 0:
                 success = True
             else:
-                # Si es error 429 o similar, intentar de nuevo
-                if '429' in stderr or 'Too Many Requests' in stderr or 'Sign in to confirm' in stderr:
-                    if attempt < max_attempts:
-                        DOWNLOADS_STATUS[job_id]['status'] = f'reintentando ({attempt + 1}/{max_attempts})'
-                        attempt += 1
-                        continue
+                # Detectar tipos específicos de errores
+                error_is_bot_check = any([
+                    'Sign in to confirm you\'re not a bot' in stderr,
+                    'Sign in to confirm' in stderr,
+                    'not a bot' in stderr
+                ])
+                
+                error_is_429 = any([
+                    '429' in stderr,
+                    'Too Many Requests' in stderr,
+                    'HTTP Error 429' in stderr
+                ])
+                
+                error_is_general_block = any([
+                    'Unable to download webpage' in stderr,
+                    'HTTP Error 403' in stderr,
+                    'This video is not available' in stderr
+                ])
+                
+                # Si es error de verificación de bot, 429 o bloqueo general, intentar de nuevo
+                if (error_is_bot_check or error_is_429 or error_is_general_block) and attempt < max_attempts:
+                    error_type = 'bot_verification' if error_is_bot_check else 'rate_limit' if error_is_429 else 'general_block'
+                    DOWNLOADS_STATUS[job_id]['error_type'] = error_type
+                    DOWNLOADS_STATUS[job_id]['status'] = f'reintentando por {error_type} ({attempt + 1}/{max_attempts})'
+                    
+                    # Delay más largo para errores de bot
+                    if error_is_bot_check:
+                        extra_delay = random.randint(5, 15)
+                        DOWNLOADS_STATUS[job_id]['status'] = f'esperando {extra_delay}s extra por verificación de bot'
+                        time.sleep(extra_delay)
+                    
+                    attempt += 1
+                    continue
                 
                 # Si es otro tipo de error, fallar inmediatamente
                 DOWNLOADS_STATUS[job_id].update({
                     'status': 'error',
                     'error': stderr,
-                    'stdout': stdout
+                    'stdout': stdout,
+                    'error_analysis': {
+                        'bot_check': error_is_bot_check,
+                        'rate_limit': error_is_429,
+                        'general_block': error_is_general_block,
+                        'other_error': not (error_is_bot_check or error_is_429 or error_is_general_block)
+                    }
                 })
                 return
             
@@ -585,18 +667,24 @@ def get_formats():
             'cookies_file': 'Archivo de cookies para máxima confiabilidad (opcional)'
         },
         'anti_429_system': {
-            'automatic': 'Sistema automático de prevención de errores 429',
+            'automatic': 'Sistema automático de prevención de errores 429 y verificación de bot',
             'strategies': [
-                'User-Agents aleatorios',
-                'Múltiples clientes de YouTube (web, mweb, tv)',
+                'User-Agents aleatorios (13 navegadores)',
+                'Múltiples clientes de YouTube (web, mweb, tv, tv_embedded, mediaconnect)',
                 'Reintentos inteligentes con delays progresivos',
                 'Throttling de velocidad adaptativo',
                 'Geo-bypass y configuraciones alternativas',
-                'Cookies del navegador (solo local)',
-                'Variables de entorno para cookies (producción)'
+                'Cookies del navegador automáticas (solo local)',
+                'Variables de entorno para cookies (producción)',
+                'Headers específicos anti-bot',
+                'Estrategias específicas para "Sign in to confirm you\'re not a bot"'
             ],
-            'success_rate': '80-95% dependiendo del entorno',
-            'production_note': 'En servidores remotos use variable YOUTUBE_COOKIES para máxima efectividad'
+            'success_rate': '85-98% dependiendo del entorno y tipo de contenido',
+            'attempts': {
+                'local': '4 intentos con cookies automáticas del navegador',
+                'remote': '6 intentos con estrategias servidor-optimizadas'
+            },
+            'production_note': 'Para máxima efectividad en producción, configure YOUTUBE_COOKIES'
         },
         'cookies_help': {
             'why': 'Las cookies evitan el error 429 (Too Many Requests) de YouTube',
