@@ -10,12 +10,59 @@ import time
 import random
 from datetime import datetime
 
-app = Flask(__name__)
-CORS(app)  # Permite requests desde cualquier origen
-
 # Configuración
 DEFAULT_OUTPUT_DIR = "/Users/O002545/Music/playlist"
 DOWNLOADS_STATUS = {}
+
+# Caché sencilla de último cliente exitoso por tipo de contenido
+CLIENT_CACHE = {}
+
+# Inicializar aplicación Flask (fue removido accidentalmente en refactor)
+app = Flask(__name__)
+CORS(app)
+
+def jitter_k(value_str, enable_jitter):
+    """Aplica jitter +/-10% a un valor terminado en 'K' (cadena) si está habilitado."""
+    try:
+        if not enable_jitter or not value_str.endswith('K'):
+            return value_str
+        base = int(value_str[:-1])
+        import random as _r
+        factor = 1 + _r.uniform(-0.10, 0.10)
+        new_val = max(5, int(base * factor))
+        return f"{new_val}K"
+    except Exception:
+        return value_str
+
+def prefetch_metadata(url, timeout=18):
+    """Obtiene metadatos rápidos del video/playlist para ajustar estrategia.
+    Devuelve (data_dict, error_str)"""
+    try:
+        prefetch_cmd = [
+            'python3','-m','yt_dlp',
+            '--dump-json','--no-check-certificate','--ignore-errors','--skip-download', url
+        ]
+        proc = subprocess.run(prefetch_cmd, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            return None, proc.stderr.strip()[:500]
+        # Tomar solo primera línea JSON (yt-dlp a veces imprime varias)
+        first_line = proc.stdout.strip().splitlines()[0]
+        data = json.loads(first_line)
+        return data, None
+    except Exception as e:
+        return None, str(e)[:500]
+
+def head_validate_small(url, timeout=8):
+    """Validación rápida haciendo petición parcial (Range) para detectar bloqueos tempranos.
+    Devuelve True si responde 2xx/206, False en error."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={'Range':'bytes=0-1023','User-Agent':get_random_user_agent()})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = resp.getcode()
+            return 200 <= code < 400
+    except Exception:
+        return False
 
 def get_random_user_agent():
     """Generar User-Agent aleatorio para evitar detección"""
@@ -167,11 +214,77 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
         
+        # Flags de características avanzadas (pack completo)
+        enable_prefetch = os.environ.get('ENABLE_PREFETCH', '1') == '1'
+        enable_cache = os.environ.get('ENABLE_CLIENT_CACHE', '1') == '1'
+        mobile_first = os.environ.get('USE_MOBILE_FIRST', '1') == '1'
+        head_validate = os.environ.get('HEAD_VALIDATE', '1') == '1'
+        jitter_enabled = os.environ.get('JITTER_THROTTLE', '1') == '1'
+
+        DOWNLOADS_STATUS[job_id]['advanced_pack'] = True
+        DOWNLOADS_STATUS[job_id]['jitter'] = jitter_enabled
+
         # Estrategias anti-bot progresivas según el entorno
         random_ua = get_random_user_agent()
-        # Heurística: detectar si la URL es un Shorts (suelen disparar más verificación)
+        # Heurísticas de tipo de contenido
         is_shorts = '/shorts/' in url
-        DOWNLOADS_STATUS[job_id]['content_type'] = 'shorts' if is_shorts else 'standard'
+        is_music = 'music.youtube.com' in url
+        content_type = 'shorts' if is_shorts else ('music' if is_music else 'standard')
+        DOWNLOADS_STATUS[job_id]['content_type'] = content_type
+
+        prefetch_data = None
+        prefetch_error = None
+        head_ok = None
+        first_audio_url = None
+        if enable_prefetch:
+            data, err = prefetch_metadata(url)
+            if data:
+                prefetch_data = data
+                DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok'
+                DOWNLOADS_STATUS[job_id]['prefetch_title'] = data.get('title', '')[:120]
+                DOWNLOADS_STATUS[job_id]['prefetch_duration'] = data.get('duration')
+                # Tratamos de extraer primera URL de audio para validación temprana
+                try:
+                    fmts = data.get('formats') or []
+                    audio_only = [f for f in fmts if f.get('vcodec') in (None,'none') and f.get('acodec') not in (None,'none')]
+                    # Ordenar por abr descendente
+                    audio_only.sort(key=lambda f: f.get('abr', 0), reverse=True)
+                    if audio_only:
+                        first_audio_url = audio_only[0].get('url')
+                except Exception:
+                    pass
+            else:
+                DOWNLOADS_STATUS[job_id]['prefetch'] = 'fail'
+                if err:
+                    prefetch_error = err
+                    DOWNLOADS_STATUS[job_id]['prefetch_error'] = err
+        # Validación HEAD parcial si habilitado y tenemos URL de audio
+        if head_validate and first_audio_url:
+            head_ok = head_validate_small(first_audio_url)
+            DOWNLOADS_STATUS[job_id]['head_check'] = head_ok
+
+        # Determinar cliente inicial usando caché / heurística
+        cached_client = CLIENT_CACHE.get(content_type) if enable_cache else None
+        base_player_client = None
+        if cached_client:
+            base_player_client = cached_client
+            DOWNLOADS_STATUS[job_id]['cache_hit'] = True
+        else:
+            DOWNLOADS_STATUS[job_id]['cache_hit'] = False
+            if mobile_first:
+                if content_type == 'shorts':
+                    base_player_client = 'mweb'
+                elif content_type == 'music':
+                    base_player_client = 'android'
+                else:
+                    base_player_client = 'web'
+            else:
+                base_player_client = 'web'
+        # Si la validación HEAD falló, preferir cambiar a un cliente diferente si es web
+        if head_ok is False and base_player_client == 'web':
+            base_player_client = 'mweb'
+            DOWNLOADS_STATUS[job_id]['head_adjusted_client'] = True
+        DOWNLOADS_STATUS[job_id]['chosen_initial_client'] = base_player_client
         
         # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
         is_remote_server_detected = any([
@@ -205,69 +318,43 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server' if is_remote_server else 'local_dev'
         
         # Definir bandera para saltar intento de extracción de cookies de navegador
+        # Preparar opciones base dependiendo del entorno
         skip_browser_cookie_scan = False
         if is_remote_server:
-            # Estrategias más agresivas para servidores remotos
-            # Para Shorts empezamos con cliente móvil (mweb) que suele requerir menos challenge
-            base_player_client = 'mweb' if is_shorts else 'web'
             anti_429_options = [
-                '--no-check-certificate',
-                '--user-agent', random_ua,
-                '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '3',
-                '--max-sleep-interval', '12',
+                '--no-check-certificate', '--user-agent', random_ua, '--referer', 'https://www.youtube.com/',
+                '--sleep-interval', '3', '--max-sleep-interval', '12',
                 '--extractor-args', f'youtube:player_client={base_player_client}',
-                '--extractor-args', 'youtube:skip=dash,hls',
-                '--no-warnings',
-                '--ignore-errors',
-                '--socket-timeout', '90',
-                '--fragment-retries', '25',
-                '--retries', '25',
-                '--throttled-rate', '50K',
-                '--geo-bypass',
-                '--geo-bypass-country', 'US'
+                '--extractor-args', 'youtube:skip=dash,hls', '--no-warnings', '--ignore-errors',
+                '--socket-timeout', '90', '--fragment-retries', '25', '--retries', '25',
+                '--throttled-rate', jitter_k('50K', jitter_enabled), '--geo-bypass', '--geo-bypass-country', 'US'
             ]
-            if is_shorts:
-                # Añadir algunos headers ligeros extra desde el inicio para Shorts
-                anti_429_options.extend([
-                    '--add-header', 'Accept-Language: en-US,en;q=0.9',
-                    '--add-header', 'DNT: 1'
-                ])
+            if content_type == 'shorts':
+                anti_429_options += ['--add-header','Accept-Language: en-US,en;q=0.9','--add-header','DNT: 1']
             DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'server_aggressive'
         else:
-            # Estrategias normales para desarrollo local + cookies automáticas
             anti_429_options = [
-                '--no-check-certificate',
-                '--user-agent', random_ua,
-                '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '2',
-                '--max-sleep-interval', '5',
-                '--extractor-args', 'youtube:player_client=web',
-                '--no-warnings',
-                '--ignore-errors',
-                '--socket-timeout', '60',
-                '--fragment-retries', '15',
-                '--retries', '15'
+                '--no-check-certificate','--user-agent', random_ua,'--referer','https://www.youtube.com/',
+                '--sleep-interval','2','--max-sleep-interval','5','--extractor-args','youtube:player_client=web',
+                '--no-warnings','--ignore-errors','--socket-timeout','60','--fragment-retries','15','--retries','15'
             ]
-            
-            # Decidir si podemos intentar cookies de navegador
             skip_browser_cookie_scan = (
                 os.environ.get('DISABLE_BROWSER_COOKIES') == '1' or
                 os.environ.get('FORCE_LOCAL_NO_BROWSER') == '1' or
-                force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1'
+                (force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1')
             )
             browser_cookies_added = False
             if not skip_browser_cookie_scan:
-                for browser in ['chrome', 'firefox', 'safari', 'edge']:
+                for browser in ['chrome','firefox','safari','edge']:
                     try:
-                        test_cmd = ['python3', '-m', 'yt_dlp', '--cookies-from-browser', browser, '--simulate', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']
+                        test_cmd = ['python3','-m','yt_dlp','--cookies-from-browser',browser,'--simulate','https://www.youtube.com/watch?v=dQw4w9WgXcQ']
                         test_process = subprocess.run(test_cmd, capture_output=True, timeout=8)
                         if test_process.returncode == 0:
-                            anti_429_options.extend(['--cookies-from-browser', browser])
+                            anti_429_options += ['--cookies-from-browser', browser]
                             DOWNLOADS_STATUS[job_id]['auto_cookies'] = f'Usando cookies de {browser}'
                             browser_cookies_added = True
                             break
-                    except Exception as _e:
+                    except Exception:
                         continue
             if browser_cookies_added:
                 DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_with_browser_cookies'
@@ -277,50 +364,36 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     DOWNLOADS_STATUS[job_id]['auto_cookies'] = 'omitido_scan_navegador'
                 else:
                     DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
-        
+
         cmd.extend(anti_429_options)
-        
-        # Log del user agent usado
         DOWNLOADS_STATUS[job_id]['user_agent'] = random_ua
-        
-        # Agregar cookies si están disponibles (prioridad alta para evitar verificación de bot)
+
+        # Cookies prioridad alta
         cookies_added = False
         temp_cookies_path = None
-        
-        # Opción 1: Usar variable de entorno YOUTUBE_COOKIES (para producción)
         if os.environ.get('YOUTUBE_COOKIES'):
-            # Crear archivo temporal con las cookies
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                 f.write(os.environ.get('YOUTUBE_COOKIES'))
                 temp_cookies_path = f.name
-            cmd.extend(['--cookies', temp_cookies_path])
+            cmd += ['--cookies', temp_cookies_path]
             DOWNLOADS_STATUS[job_id]['cookies'] = 'Usando cookies desde variable de entorno'
             cookies_added = True
-        
-        # Opción 2: Usar archivo cookies.txt (para desarrollo)
         elif cookies_file:
-            # Verificar si el archivo existe
             if os.path.exists(cookies_file):
-                cmd.extend(['--cookies', cookies_file])
+                cmd += ['--cookies', cookies_file]
                 DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_file}'
                 cookies_added = True
             else:
-                # Buscar en la carpeta actual del script
                 script_dir = os.path.dirname(os.path.abspath(__file__))
-                cookies_path = os.path.join(script_dir, cookies_file)
-                if os.path.exists(cookies_path):
-                    cmd.extend(['--cookies', cookies_path])
-                    DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_path}'
+                alt = os.path.join(script_dir, cookies_file)
+                if os.path.exists(alt):
+                    cmd += ['--cookies', alt]
+                    DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {alt}'
                     cookies_added = True
-        
-        # Opción 3: Si no hay cookies explícitas y estamos en local, ya se intentaron las cookies del navegador arriba
-        
-        # Mensaje informativo sobre cookies y nivel anti-bot
         elif not cookies_added and is_remote_server:
             DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot sin cookies'
-            # Cookie sintética si se emula local o se solicita explícitamente
-            if (force_local or os.environ.get('ALLOW_FAKE_COOKIE') == '1') and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
+            if (force_local or os.environ.get('ALLOW_FAKE_COOKIE') == '1') and os.environ.get('USE_FAKE_CONSENT_COOKIE','1') == '1':
                 try:
                     import tempfile
                     fake_cookie_content = os.environ.get('FAKE_COOKIE_CONTENT', (
@@ -333,22 +406,22 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     fake_file.write(fake_cookie_content)
                     fake_file.close()
                     temp_cookies_path = fake_file.name
-                    cmd.extend(['--cookies', temp_cookies_path])
+                    cmd += ['--cookies', temp_cookies_path]
                     DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica'
                 except Exception as e:
                     DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
         else:
-            DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies manuales + estrategias anti-bot'
-        
-        # Configurar formato
+            if not cookies_added:
+                DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies manuales + estrategias anti-bot'
+
+        # Formato/naming
         if format_type == 'mp3':
-            cmd.extend(['-x', '--audio-format', 'mp3'])
-            cmd.extend(['--audio-quality', quality])
+            cmd += ['-x','--audio-format','mp3','--audio-quality', quality]
         elif format_type == 'mp4':
             cmd.extend(['-f', 'best'])
-        else:  # best
+        else:
             cmd.extend(['-f', 'best'])
-        
+
         # Configurar plantilla de nombres
         if naming == 'title':
             template = '%(title)s.%(ext)s'
@@ -356,7 +429,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             template = '%(artist|uploader|Unknown)s - %(title)s.%(ext)s'
         else:
             template = '%(title)s.%(ext)s'
-        
+
         output_template = os.path.join(output_dir, template)
         cmd.extend(['-o', output_template])
         
@@ -374,7 +447,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         attempt = 1
         # Permitir intento adicional super agresivo (7) controlado por variable
         enable_final_aggressive = os.environ.get('AGGRESSIVE_FINAL_ATTEMPT', '1') == '1'
-        max_attempts = (7 if (is_remote_server and enable_final_aggressive) else (6 if is_remote_server else (5 if enable_final_aggressive else 4)))
+        # Ajustar max_attempts para incluir android / ios si pack completo
+        extra_clients = 2  # android + ios
+        base_remote = 6 if is_remote_server else 4
+        max_attempts = base_remote + (1 if enable_final_aggressive else 0) + (extra_clients if enable_final_aggressive else 0)
+        max_attempts = min(max_attempts, 9)
+        DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
@@ -714,6 +792,19 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             for file in os.listdir(output_dir):
                 if file.endswith(('.mp3', '.mp4', '.webm', '.m4a')):
                     downloaded_files.append(os.path.join(output_dir, file))
+
+            # Guardar cliente exitoso en caché si posible
+            if enable_cache:
+                # Intentar inferir último client usado buscando en comando final
+                final_cmd = DOWNLOADS_STATUS[job_id].get('command','')
+                chosen = None
+                for marker in ['player_client=android','player_client=ios','player_client=mweb','player_client=tv_embedded','player_client=tv','player_client=web_embedded','player_client=mediaconnect','player_client=web']:
+                    if marker in final_cmd:
+                        chosen = marker.split('=')[1]
+                        break
+                if chosen:
+                    CLIENT_CACHE[content_type] = chosen
+                    DOWNLOADS_STATUS[job_id]['cached_saved'] = chosen
             
             DOWNLOADS_STATUS[job_id].update({
                 'status': 'completado',
