@@ -118,9 +118,9 @@ def download():
         quality = data.get('quality', '0')  # 0=mejor, 320K, 256K, 128K
         naming = data.get('naming', 'artist-title')  # title, artist-title
         output_dir = data.get('output_dir')  # Ahora es obligatorio especificar la carpeta
-    cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
-    force_local = str(data.get('force_local', '0')) in ['1', 'true', 'True']
-    force_remote = str(data.get('force_remote', '0')) in ['1', 'true', 'True']
+        cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
+        force_local = str(data.get('force_local', '0')) in ['1', 'true', 'True']
+        force_remote = str(data.get('force_remote', '0')) in ['1', 'true', 'True']
         
         # Validar que se especifique output_dir
         if not output_dir:
@@ -146,7 +146,7 @@ def download():
         }
         
         # Ejecutar descarga en hilo separado
-    thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file, force_local, force_remote))
+        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file, force_local, force_remote))
         thread.daemon = True
         thread.start()
         
