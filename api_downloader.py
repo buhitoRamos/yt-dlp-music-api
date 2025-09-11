@@ -20,13 +20,30 @@ DOWNLOADS_STATUS = {}
 def get_random_user_agent():
     """Generar User-Agent aleatorio para evitar detección"""
     user_agents = [
+        # Chrome Windows
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+        
+        # Chrome Mac
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        
+        # Safari Mac
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
+        
+        # Firefox
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0'
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0',
+        'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
+        
+        # Edge
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+        
+        # Mobile Chrome
+        'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1'
     ]
     return random.choice(user_agents)
 
@@ -148,24 +165,29 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
         
-        # Estrategias anti-429 sin cookies
+        # Estrategias anti-429 más agresivas para servidores remotos
         random_ua = get_random_user_agent()
         anti_429_options = [
             '--no-check-certificate',
             '--user-agent', random_ua,
             '--referer', 'https://www.youtube.com/',
-            '--sleep-interval', '1',
-            '--max-sleep-interval', '3',
-            '--sleep-subtitles', '1',
-            '--extractor-args', 'youtube:player_client=web,mweb',
+            '--sleep-interval', '2',
+            '--max-sleep-interval', '5',
+            '--sleep-subtitles', '2',
+            '--extractor-args', 'youtube:player_client=web,mweb,tv',
             '--extractor-args', 'youtube:skip=dash,hls',
+            '--extractor-args', 'youtube:player_skip=webpage,configs',
             '--no-warnings',
             '--ignore-errors',
             '--no-abort-on-error',
-            '--retry-sleep', '2',
-            '--socket-timeout', '30',
-            '--fragment-retries', '10',
-            '--retries', '10'
+            '--retry-sleep', '3',
+            '--socket-timeout', '60',
+            '--fragment-retries', '15',
+            '--retries', '15',
+            '--force-ipv4',
+            '--no-cache-dir',
+            '--throttled-rate', '100K',
+            '--extract-flat'
         ]
         cmd.extend(anti_429_options)
         
@@ -237,10 +259,10 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Ejecutar comando con manejo de errores 429
         DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
         
-        # Intentar descarga con estrategias múltiples
+        # Intentar descarga con estrategias múltiples y más agresivas
         success = False
         attempt = 1
-        max_attempts = 3
+        max_attempts = 5  # Aumentamos a 5 intentos
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
@@ -249,15 +271,47 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Estrategias adicionales para intentos posteriores
                 cmd_retry = cmd.copy()
                 
+                # Remover extract-flat para intentos posteriores
+                if '--extract-flat' in cmd_retry:
+                    cmd_retry.remove('--extract-flat')
+                
                 if attempt == 2:
-                    # Segundo intento: usar cliente móvil
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb,web'])
+                    # Segundo intento: usar cliente móvil con más delays
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
+                    cmd_retry.extend(['--sleep-interval', '5'])
                 elif attempt == 3:
                     # Tercer intento: usar cliente de TV
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=tv,web'])
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=tv'])
+                    cmd_retry.extend(['--sleep-interval', '8'])
+                elif attempt == 4:
+                    # Cuarto intento: estrategia más conservadora
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=web'])
+                    cmd_retry.extend(['--sleep-interval', '10'])
+                    cmd_retry.extend(['--throttled-rate', '50K'])
+                elif attempt == 5:
+                    # Último intento: máxima precaución + cookies del navegador si es posible
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
+                    cmd_retry.extend(['--sleep-interval', '15'])
+                    cmd_retry.extend(['--throttled-rate', '25K'])
+                    
+                    # Intentar usar cookies del navegador como último recurso
+                    try:
+                        cmd_retry.extend(['--cookies-from-browser', 'chrome'])
+                        DOWNLOADS_STATUS[job_id]['info'] = 'Último intento: usando cookies del navegador'
+                    except:
+                        DOWNLOADS_STATUS[job_id]['info'] = 'Último intento: sin cookies del navegador'
+                    
+                    # Cambiar user agent
+                    new_ua = get_random_user_agent()
+                    for i, arg in enumerate(cmd_retry):
+                        if arg == '--user-agent' and i + 1 < len(cmd_retry):
+                            cmd_retry[i + 1] = new_ua
+                            break
                 
-                # Agregar delay más largo entre intentos
-                time.sleep(random.randint(3, 8))
+                # Agregar delay progresivo entre intentos
+                delay = random.randint(5 + (attempt * 3), 10 + (attempt * 5))
+                DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
+                time.sleep(delay)
                 cmd = cmd_retry
             
             process = subprocess.Popen(
