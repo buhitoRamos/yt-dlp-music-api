@@ -137,6 +137,11 @@ document.addEventListener('DOMContentLoaded', function() {
         
         const formData = new FormData(this);
         const data = Object.fromEntries(formData);
+        // Añadir flags avanzados
+        const fl = document.getElementById('force_local');
+        const fr = document.getElementById('force_remote');
+        if (fl) data.force_local = fl.checked ? '1' : '0';
+        if (fr) data.force_remote = fr.checked ? '1' : '0';
         
         // Mostrar estado inicial
         showStatus('loading', 'Iniciando descarga...');
@@ -168,6 +173,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 // Iniciar polling del estado
                 statusInterval = setInterval(checkStatus, 2000);
+                // Limpiar panel de estrategia anterior
+                const stratBox = document.getElementById('strategyInfo');
+                if (stratBox) { stratBox.innerHTML=''; stratBox.style.display='none'; }
             } else {
                 showStatus('error', `Error: ${result.error}`);
                 resetButton();
@@ -261,6 +269,25 @@ function updateStatusDisplay(status) {
             setProgress(0);
             break;
     }
+    // Actualizar panel de estrategia
+    try {
+        const box = document.getElementById('strategyInfo');
+        if (!box) return;
+        const lines = [];
+        if (status.environment) lines.push(`🌐 Entorno: ${status.environment}`);
+        if (status.is_remote_detected !== undefined) lines.push(`🔍 remoto_detectado: ${status.is_remote_detected}`);
+        if (status.force_mode) lines.push(`⚙️ Modo forzado: ${status.force_mode}`);
+        if (status.anti_bot_level) lines.push(`🛡️ Anti-bot: ${status.anti_bot_level}`);
+        if (status.attempt) lines.push(`🔁 Intento: ${status.attempt}`);
+        if (status.error_type) lines.push(`🚧 Error previo: ${status.error_type}`);
+        if (status.cookies) lines.push(`🍪 ${status.cookies}`);
+        if (status.info) lines.push(`ℹ️ ${status.info}`);
+        if (status.user_agent) lines.push(`UA: ${status.user_agent.substring(0,90)}...`);
+        if (lines.length) {
+            box.style.display = 'block';
+            box.innerHTML = lines.map(l=>`<div>${l}</div>`).join('');
+        }
+    } catch(e){ /* noop */ }
 }
 
 // Mostrar estado

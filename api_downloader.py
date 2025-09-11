@@ -118,7 +118,9 @@ def download():
         quality = data.get('quality', '0')  # 0=mejor, 320K, 256K, 128K
         naming = data.get('naming', 'artist-title')  # title, artist-title
         output_dir = data.get('output_dir')  # Ahora es obligatorio especificar la carpeta
-        cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
+    cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
+    force_local = str(data.get('force_local', '0')) in ['1', 'true', 'True']
+    force_remote = str(data.get('force_remote', '0')) in ['1', 'true', 'True']
         
         # Validar que se especifique output_dir
         if not output_dir:
@@ -144,7 +146,7 @@ def download():
         }
         
         # Ejecutar descarga en hilo separado
-        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file))
+    thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file, force_local, force_remote))
         thread.daemon = True
         thread.start()
         
@@ -157,7 +159,7 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None):
+def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None, force_local=False, force_remote=False):
     try:
         # Actualizar estado
         DOWNLOADS_STATUS[job_id]['status'] = 'descargando'
@@ -169,7 +171,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         random_ua = get_random_user_agent()
         
         # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
-        is_remote_server = any([
+        is_remote_server_detected = any([
             os.environ.get('RENDER'),
             os.environ.get('HEROKU'),
             os.environ.get('RAILWAY_PROJECT_ID'),
@@ -177,6 +179,16 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             'render.com' in os.environ.get('HOSTNAME', ''),
             'heroku.com' in os.environ.get('HOSTNAME', '')
         ])
+        # Aplicar overrides por request
+        if force_local and not force_remote:
+            is_remote_server = False
+            DOWNLOADS_STATUS[job_id]['force_mode'] = 'local_emulation'
+        elif force_remote and not force_local:
+            is_remote_server = True
+            DOWNLOADS_STATUS[job_id]['force_mode'] = 'remote_forced'
+        else:
+            is_remote_server = is_remote_server_detected
+        DOWNLOADS_STATUS[job_id]['is_remote_detected'] = is_remote_server_detected
 
         # Overrides manuales para emular entorno (solución rápida en hosting)
         if os.environ.get('FORCE_LOCAL_MODE') == '1' or os.environ.get('FORCE_LOCAL_STRATEGIES') == '1':
@@ -284,25 +296,26 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Opción 3: Si no hay cookies explícitas y estamos en local, ya se intentaron las cookies del navegador arriba
         
         # Mensaje informativo sobre cookies y nivel anti-bot
-        if not cookies_added and not is_remote_server:
-            if 'auto_cookies' in DOWNLOADS_STATUS[job_id]:
-                DOWNLOADS_STATUS[job_id]['info'] = f'Usando cookies automáticas + estrategias anti-bot'
-            else:
-                DOWNLOADS_STATUS[job_id]['info'] = 'Usando estrategias anti-bot básicas (sin cookies disponibles)'
         elif not cookies_added and is_remote_server:
             DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot avanzadas sin cookies'
-            # Si se forzó modo local pero seguimos sin cookies, intentar cookie sintética mínima
-            if os.environ.get('FORCE_LOCAL_MODE') == '1' and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
+            # Si se está emulando local (force_local) generar cookie sintética
+            if force_local and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
                 try:
                     import tempfile
-                    fake_cookie_content = """# Netscape HTTP Cookie File
-.youtube.com	TRUE	/	TRUE	2147483647	CONSENT	YES+cb
-.youtube.com	TRUE	/	TRUE	2147483647	PREF	f1=50000000&tz=UTC
-"""
+                    fake_cookie_content = (
+                        "# Netscape HTTP Cookie File\n"
+                        ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tCONSENT\tYES+cb\n"
+                        ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tPREF\tf1=50000000&tz=UTC\n"
+                    )
                     fake_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
                     fake_file.write(fake_cookie_content)
                     fake_file.close()
                     temp_cookies_path = fake_file.name
+                    cmd.extend(['--cookies', temp_cookies_path])
+                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica_minima'
+                    DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookie sintética CONSENT (emulación local)'
+                except Exception as e:
+                    DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
                     cmd.extend(['--cookies', temp_cookies_path])
                     DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica_minima'
                     DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookie sintética CONSENT (emulación local)'

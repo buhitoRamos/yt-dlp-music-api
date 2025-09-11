@@ -30,6 +30,17 @@
                         placeholder="https://music.youtube.com/playlist?list=..."
                     >
                 </div>
+
+                <div class="form-group" style="margin-top:10px; border:1px dashed #ccc; padding:10px; border-radius:8px; background:#f9f9fb;">
+                    <label style="font-weight:600;">⚙️ Opciones avanzadas anti-bloqueo:</label>
+                    <div style="display:flex; gap:15px; flex-wrap:wrap; align-items:center; margin-top:6px; font-size:0.85rem;">
+                        <label><input type="checkbox" id="force_local" name="force_local" value="1"> Forzar modo local</label>
+                        <label><input type="checkbox" id="force_remote" name="force_remote" value="1"> Forzar modo remoto</label>
+                        <button type="button" id="refreshEnv" style="background:#eef; border:1px solid #99c; padding:4px 8px; border-radius:6px; cursor:pointer;">🔄 Ver Entorno</button>
+                        <span id="envDisplay" style="color:#555;">Entorno: <em>desconocido</em></span>
+                    </div>
+                    <small style="display:block; margin-top:4px; color:#666; line-height:1.2;">Usa forzar local si en hosting obtienes bloqueo inmediato. Evita marcar ambos.</small>
+                </div>
                 
                 <div class="grid">
                     <div class="form-group">
@@ -112,6 +123,7 @@
                 </div>
                 
                 <div id="jobInfo" style="margin-top: 10px; font-size: 0.9rem; color: #666;"></div>
+                <div id="strategyInfo" style="margin-top:6px; font-size:0.75rem; color:#444; display:none;"></div>
                 
                 <div id="filesContainer" class="files-list" style="display: none;">
                     <strong>✅ Archivos descargados:</strong>
