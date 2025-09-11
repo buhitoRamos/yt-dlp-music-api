@@ -184,8 +184,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 '--no-check-certificate',
                 '--user-agent', random_ua,
                 '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '3',
-                '--max-sleep-interval', '8',
+                '--sleep-interval', '2',
+                '--max-sleep-interval', '10',
                 '--extractor-args', 'youtube:player_client=web',
                 '--extractor-args', 'youtube:skip=dash',
                 '--no-warnings',
@@ -220,6 +220,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         
         # Agregar cookies si están disponibles (opcional)
         cookies_added = False
+        temp_cookies_path = None
         
         # Opción 1: Usar variable de entorno YOUTUBE_COOKIES (para producción)
         if os.environ.get('YOUTUBE_COOKIES'):
@@ -292,55 +293,100 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
             
             if attempt > 1:
-                # Estrategias adicionales para intentos posteriores
-                cmd_retry = cmd.copy()
+                # Crear comando modificado para reintentos
+                cmd_retry = ['python3', '-m', 'yt_dlp']
                 
-                if attempt == 2:
-                    # Segundo intento: cliente móvil
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
-                    if is_remote_server:
-                        cmd_retry.extend(['--sleep-interval', '5'])
-                elif attempt == 3:
-                    # Tercer intento: cliente TV
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=tv'])
-                    if is_remote_server:
-                        cmd_retry.extend(['--sleep-interval', '8'])
-                elif attempt == 4 and is_remote_server:
-                    # Cuarto intento: con throttling más agresivo
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=web'])
-                    cmd_retry.extend(['--throttled-rate', '25K'])
-                    cmd_retry.extend(['--sleep-interval', '12'])
-                elif attempt == 5 and is_remote_server:
-                    # Último intento: usar cookies de entorno si están disponibles
-                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
-                    cmd_retry.extend(['--throttled-rate', '10K'])
-                    cmd_retry.extend(['--sleep-interval', '15'])
-                    
-                    # Verificar si hay cookies en variables de entorno
-                    if os.environ.get('YOUTUBE_COOKIES'):
-                        try:
-                            import tempfile
-                            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                                f.write(os.environ.get('YOUTUBE_COOKIES'))
-                                temp_cookies_path = f.name
-                            cmd_retry.extend(['--cookies', temp_cookies_path])
-                            DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_variable'
-                        except Exception as e:
-                            DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                # Calcular sleep intervals progresivos (asegurar que max > min)
+                base_sleep = 2 if is_remote_server else 1
+                min_sleep = base_sleep + (attempt - 1) * 2
+                max_sleep = min_sleep + 8
                 
-                # Cambiar user agent en cada intento
                 new_ua = get_random_user_agent()
-                for i, arg in enumerate(cmd_retry):
-                    if arg == '--user-agent' and i + 1 < len(cmd_retry):
-                        cmd_retry[i + 1] = new_ua
-                        break
                 
-                # Delay progresivo más largo en servidores remotos
-                base_delay = 8 if is_remote_server else 3
-                delay = random.randint(base_delay + attempt, base_delay + (attempt * 3))
+                if is_remote_server:
+                    retry_options = [
+                        '--no-check-certificate',
+                        '--user-agent', new_ua,
+                        '--referer', 'https://www.youtube.com/',
+                        '--sleep-interval', str(min_sleep),
+                        '--max-sleep-interval', str(max_sleep),
+                        '--no-warnings',
+                        '--ignore-errors',
+                        '--socket-timeout', '90',
+                        '--fragment-retries', '20',
+                        '--retries', '20'
+                    ]
+                    
+                    # Estrategias específicas por intento
+                    if attempt == 2:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=mweb',
+                            '--throttled-rate', '30K'
+                        ])
+                    elif attempt == 3:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=tv',
+                            '--throttled-rate', '20K'
+                        ])
+                    elif attempt == 4:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=web',
+                            '--extractor-args', 'youtube:skip=dash',
+                            '--throttled-rate', '15K'
+                        ])
+                    elif attempt == 5:
+                        retry_options.extend([
+                            '--extractor-args', 'youtube:player_client=mweb',
+                            '--throttled-rate', '10K'
+                        ])
+                        # Intentar usar cookies de entorno si están disponibles
+                        if os.environ.get('YOUTUBE_COOKIES'):
+                            try:
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                    temp_cookies_path = f.name
+                                retry_options.extend(['--cookies', temp_cookies_path])
+                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_variable'
+                            except Exception as e:
+                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                else:
+                    retry_options = [
+                        '--no-check-certificate',
+                        '--user-agent', new_ua,
+                        '--referer', 'https://www.youtube.com/',
+                        '--sleep-interval', str(min_sleep),
+                        '--max-sleep-interval', str(max_sleep),
+                        '--extractor-args', 'youtube:player_client=web',
+                        '--no-warnings',
+                        '--ignore-errors',
+                        '--socket-timeout', '60',
+                        '--fragment-retries', '10',
+                        '--retries', '10'
+                    ]
+                
+                cmd_retry.extend(retry_options)
+                
+                # Configurar formato (mantener configuración original)
+                if format_type == 'mp3':
+                    cmd_retry.extend(['-x', '--audio-format', 'mp3', '--audio-quality', quality])
+                elif format_type == 'mp4':
+                    cmd_retry.extend(['-f', 'best'])
+                else:
+                    cmd_retry.extend(['-f', 'best'])
+                
+                cmd_retry.extend(['-o', output_template])
+                cmd_retry.extend(['--write-info-json', '--no-playlist' if 'playlist' not in url else ''])
+                cmd_retry = [x for x in cmd_retry if x]
+                cmd_retry.append(url)
+                
+                # Delay progresivo antes del reintento
+                delay = random.randint(3 + attempt, 8 + (attempt * 2))
                 DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
                 time.sleep(delay)
+                
                 cmd = cmd_retry
+                DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
             
             process = subprocess.Popen(
                 cmd, 
@@ -413,7 +459,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         })
     finally:
         # Limpiar archivo temporal de cookies si se creó
-        if 'temp_cookies_path' in locals():
+        if 'temp_cookies_path' in locals() and temp_cookies_path:
             try:
                 os.unlink(temp_cookies_path)
             except:
@@ -461,15 +507,6 @@ def get_environment_info():
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
-    if job_id not in DOWNLOADS_STATUS:
-        return jsonify({'error': 'Job ID no encontrado'}), 404
-    
-    # Crear una copia del estado sin el objeto proceso (no serializable)
-    status = DOWNLOADS_STATUS[job_id].copy()
-    if 'process' in status:
-        del status['process']
-    
-    return jsonify(status)
     if job_id not in DOWNLOADS_STATUS:
         return jsonify({'error': 'Job ID no encontrado'}), 404
     
