@@ -41,8 +41,10 @@ def api_info():
         'required_fields': ['url', 'output_dir'],
         'cookies_info': {
             'note': 'Para evitar error 429 (Too Many Requests), usa cookies de YouTube',
-            'how_to': 'Exporta cookies.txt con la extensión "Get cookies.txt" desde youtube.com',
-            'placement': 'Coloca cookies.txt en la misma carpeta que este script'
+            'local_dev': 'Exporta cookies.txt con la extensión "Get cookies.txt" desde youtube.com',
+            'production': 'En producción (Render/Heroku), usa la variable de entorno YOUTUBE_COOKIES',
+            'placement': 'Coloca cookies.txt en la misma carpeta que este script',
+            'env_var': 'Variable de entorno YOUTUBE_COOKIES con contenido del archivo cookies.txt'
         }
     })
 
@@ -128,12 +130,27 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp
         cmd = ['python3', '-m', 'yt_dlp']
         
-        # Agregar cookies si se especifica el archivo
-        if cookies_file:
+        # Agregar cookies si se especifica el archivo o variable de entorno
+        cookies_added = False
+        
+        # Opción 1: Usar variable de entorno YOUTUBE_COOKIES (para producción)
+        if os.environ.get('YOUTUBE_COOKIES'):
+            # Crear archivo temporal con las cookies
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write(os.environ.get('YOUTUBE_COOKIES'))
+                temp_cookies_path = f.name
+            cmd.extend(['--cookies', temp_cookies_path])
+            DOWNLOADS_STATUS[job_id]['cookies'] = 'Usando cookies desde variable de entorno'
+            cookies_added = True
+        
+        # Opción 2: Usar archivo cookies.txt (para desarrollo)
+        elif cookies_file:
             # Verificar si el archivo existe
             if os.path.exists(cookies_file):
                 cmd.extend(['--cookies', cookies_file])
                 DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_file}'
+                cookies_added = True
             else:
                 # Buscar en la carpeta actual del script
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -141,8 +158,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 if os.path.exists(cookies_path):
                     cmd.extend(['--cookies', cookies_path])
                     DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_path}'
+                    cookies_added = True
                 else:
                     DOWNLOADS_STATUS[job_id]['warning'] = f'Archivo de cookies no encontrado: {cookies_file}'
+        
+        # Si no se encontraron cookies, agregar advertencia
+        if not cookies_added:
+            DOWNLOADS_STATUS[job_id]['warning'] = 'Sin cookies configuradas - pueden ocurrir errores 429'
         
         # Configurar formato
         if format_type == 'mp3':
@@ -218,6 +240,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             'status': 'error',
             'error': str(e)
         })
+    finally:
+        # Limpiar archivo temporal de cookies si se creó
+        if 'temp_cookies_path' in locals():
+            try:
+                os.unlink(temp_cookies_path)
+            except:
+                pass
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
