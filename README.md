@@ -10,11 +10,13 @@ Una API web moderna para descargar música de YouTube y YouTube Music con interf
 
 - 🎯 **Interfaz Web Moderna**: Frontend responsive con CSS3 y JavaScript ES6+
 - 🚀 **API RESTful**: Endpoints completos para descarga y monitoreo
+- 🛡️ **Sistema Anti-Bloqueo Inteligente**: Detecta automáticamente el entorno y aplica estrategias específicas
 - ❌ **Cancelación en Tiempo Real**: Botón para cancelar descargas en progreso
 - 📁 **Selector de Carpetas**: Integración con File System Access API
 - 📊 **Monitoreo de Progreso**: Status en tiempo real de las descargas
 - 🎵 **Múltiples Formatos**: MP3, MP4, y mejor calidad disponible
 - 🎨 **Diseño Responsive**: Compatible con móviles y escritorio
+- 🌐 **Optimizado para Hosting**: Funciona automáticamente en Render, Heroku, Railway
 
 ## 🛠️ Instalación
 
@@ -54,6 +56,7 @@ http://localhost:8080
 - `GET /status/<job_id>` - Ver progreso
 - `POST /cancel/<job_id>` - Cancelar descarga
 - `GET /formats` - Formatos disponibles
+- `GET /environment` - Información del entorno y estrategias aplicadas
 - `GET /jobs` - Listar trabajos
 
 ## 📁 Estructura del Proyecto

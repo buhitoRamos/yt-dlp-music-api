@@ -165,22 +165,54 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
         
-        # Estrategias anti-429 más agresivas para servidores remotos
+        # Estrategias anti-429 progresivas según el entorno
         random_ua = get_random_user_agent()
-        anti_429_options = [
-            '--no-check-certificate',
-            '--user-agent', random_ua,
-            '--referer', 'https://www.youtube.com/',
-            '--sleep-interval', '2',
-            '--max-sleep-interval', '5',
-            '--extractor-args', 'youtube:player_client=web',
-            '--no-warnings',
-            '--ignore-errors',
-            '--no-abort-on-error',
-            '--socket-timeout', '60',
-            '--fragment-retries', '10',
-            '--retries', '10'
-        ]
+        
+        # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
+        is_remote_server = any([
+            os.environ.get('RENDER'),
+            os.environ.get('HEROKU'),
+            os.environ.get('RAILWAY_PROJECT_ID'),
+            os.environ.get('VERCEL'),
+            'render.com' in os.environ.get('HOSTNAME', ''),
+            'heroku.com' in os.environ.get('HOSTNAME', '')
+        ])
+        
+        if is_remote_server:
+            # Estrategias más agresivas para servidores remotos
+            anti_429_options = [
+                '--no-check-certificate',
+                '--user-agent', random_ua,
+                '--referer', 'https://www.youtube.com/',
+                '--sleep-interval', '3',
+                '--max-sleep-interval', '8',
+                '--extractor-args', 'youtube:player_client=web',
+                '--extractor-args', 'youtube:skip=dash',
+                '--no-warnings',
+                '--ignore-errors',
+                '--socket-timeout', '90',
+                '--fragment-retries', '20',
+                '--retries', '20',
+                '--throttled-rate', '50K'
+            ]
+            DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server'
+        else:
+            # Estrategias normales para desarrollo local
+            anti_429_options = [
+                '--no-check-certificate',
+                '--user-agent', random_ua,
+                '--referer', 'https://www.youtube.com/',
+                '--sleep-interval', '1',
+                '--max-sleep-interval', '3',
+                '--extractor-args', 'youtube:player_client=web',
+                '--no-warnings',
+                '--ignore-errors',
+                '--socket-timeout', '60',
+                '--fragment-retries', '10',
+                '--retries', '10'
+            ]
+            DOWNLOADS_STATUS[job_id]['environment'] = 'local_dev'
+        
         cmd.extend(anti_429_options)
         
         # Log del user agent usado
@@ -251,10 +283,10 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Ejecutar comando con manejo de errores 429
         DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
         
-        # Intentar descarga con estrategias múltiples y más agresivas
+        # Intentar descarga con estrategias adaptadas al entorno
         success = False
         attempt = 1
-        max_attempts = 3  # Reducimos a 3 para evitar problemas
+        max_attempts = 5 if is_remote_server else 3
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
@@ -264,26 +296,48 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd_retry = cmd.copy()
                 
                 if attempt == 2:
-                    # Segundo intento: usar cliente móvil
+                    # Segundo intento: cliente móvil
                     cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
-                    # Cambiar user agent
-                    new_ua = get_random_user_agent()
-                    for i, arg in enumerate(cmd_retry):
-                        if arg == '--user-agent' and i + 1 < len(cmd_retry):
-                            cmd_retry[i + 1] = new_ua
-                            break
+                    if is_remote_server:
+                        cmd_retry.extend(['--sleep-interval', '5'])
                 elif attempt == 3:
-                    # Tercer intento: cliente TV con cookies si están disponibles
+                    # Tercer intento: cliente TV
                     cmd_retry.extend(['--extractor-args', 'youtube:player_client=tv'])
-                    # Cambiar user agent
-                    new_ua = get_random_user_agent()
-                    for i, arg in enumerate(cmd_retry):
-                        if arg == '--user-agent' and i + 1 < len(cmd_retry):
-                            cmd_retry[i + 1] = new_ua
-                            break
+                    if is_remote_server:
+                        cmd_retry.extend(['--sleep-interval', '8'])
+                elif attempt == 4 and is_remote_server:
+                    # Cuarto intento: con throttling más agresivo
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=web'])
+                    cmd_retry.extend(['--throttled-rate', '25K'])
+                    cmd_retry.extend(['--sleep-interval', '12'])
+                elif attempt == 5 and is_remote_server:
+                    # Último intento: usar cookies de entorno si están disponibles
+                    cmd_retry.extend(['--extractor-args', 'youtube:player_client=mweb'])
+                    cmd_retry.extend(['--throttled-rate', '10K'])
+                    cmd_retry.extend(['--sleep-interval', '15'])
+                    
+                    # Verificar si hay cookies en variables de entorno
+                    if os.environ.get('YOUTUBE_COOKIES'):
+                        try:
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                temp_cookies_path = f.name
+                            cmd_retry.extend(['--cookies', temp_cookies_path])
+                            DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_variable'
+                        except Exception as e:
+                            DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
                 
-                # Agregar delay progresivo entre intentos
-                delay = random.randint(3 + attempt, 8 + attempt)
+                # Cambiar user agent en cada intento
+                new_ua = get_random_user_agent()
+                for i, arg in enumerate(cmd_retry):
+                    if arg == '--user-agent' and i + 1 < len(cmd_retry):
+                        cmd_retry[i + 1] = new_ua
+                        break
+                
+                # Delay progresivo más largo en servidores remotos
+                base_delay = 8 if is_remote_server else 3
+                delay = random.randint(base_delay + attempt, base_delay + (attempt * 3))
                 DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
                 time.sleep(delay)
                 cmd = cmd_retry
@@ -365,8 +419,57 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             except:
                 pass
 
+@app.route('/environment', methods=['GET'])
+def get_environment_info():
+    """Obtener información del entorno y estrategias aplicadas"""
+    
+    # Detectar entorno
+    is_remote_server = any([
+        os.environ.get('RENDER'),
+        os.environ.get('HEROKU'),
+        os.environ.get('RAILWAY_PROJECT_ID'),
+        os.environ.get('VERCEL'),
+        'render.com' in os.environ.get('HOSTNAME', ''),
+        'heroku.com' in os.environ.get('HOSTNAME', '')
+    ])
+    
+    env_info = {
+        'environment': 'remote_server' if is_remote_server else 'local_development',
+        'platform_detected': [],
+        'anti_blocking_strategies': {
+            'max_attempts': 5 if is_remote_server else 3,
+            'sleep_intervals': '3-8s' if is_remote_server else '1-3s',
+            'throttling': '50K-10K' if is_remote_server else 'none',
+            'timeout': '90s' if is_remote_server else '60s',
+            'retries': '20' if is_remote_server else '10'
+        },
+        'cookies_available': bool(os.environ.get('YOUTUBE_COOKIES')),
+        'hostname': os.environ.get('HOSTNAME', 'unknown')
+    }
+    
+    # Detectar plataformas específicas
+    if os.environ.get('RENDER'):
+        env_info['platform_detected'].append('Render')
+    if os.environ.get('HEROKU'):
+        env_info['platform_detected'].append('Heroku')
+    if os.environ.get('RAILWAY_PROJECT_ID'):
+        env_info['platform_detected'].append('Railway')
+    if os.environ.get('VERCEL'):
+        env_info['platform_detected'].append('Vercel')
+    
+    return jsonify(env_info)
+
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error': 'Job ID no encontrado'}), 404
+    
+    # Crear una copia del estado sin el objeto proceso (no serializable)
+    status = DOWNLOADS_STATUS[job_id].copy()
+    if 'process' in status:
+        del status['process']
+    
+    return jsonify(status)
     if job_id not in DOWNLOADS_STATUS:
         return jsonify({'error': 'Job ID no encontrado'}), 404
     
