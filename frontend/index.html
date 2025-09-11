@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>yt-dlp Music Downloader</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 Music Downloader</h1>
+            <p>Descarga música y playlists de YouTube Music fácilmente</p>
+            <p class="powered-by">Powered by Buh!to</p>
+        </div>
+        
+        <div class="form-container">
+            <form id="downloadForm">
+                <div class="form-group">
+                    <label for="url">🔗 URL de la playlist o video:</label>
+                    <input 
+                        type="url" 
+                        id="url" 
+                        name="url" 
+                        required 
+                        placeholder="https://music.youtube.com/playlist?list=..."
+                    >
+                </div>
+                
+                <div class="grid">
+                    <div class="form-group">
+                        <label for="format">🎼 Formato:</label>
+                        <select id="format" name="format">
+                            <option value="mp3">🎵 MP3 (Solo audio)</option>
+                            <option value="mp4">🎬 MP4 (Video completo)</option>
+                            <option value="best">⭐ Mejor disponible</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="quality">🔊 Calidad:</label>
+                        <select id="quality" name="quality">
+                            <option value="0">🏆 Mejor calidad (VBR)</option>
+                            <option value="320K">320 kbps</option>
+                            <option value="256K">256 kbps</option>
+                            <option value="192K">192 kbps</option>
+                            <option value="128K">128 kbps</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="naming">📝 Formato de nombres:</label>
+                    <select id="naming" name="naming">
+                        <option value="artist-title">🎤 Artista - Título</option>
+                        <option value="title">📄 Solo título</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="output_dir">📁 Carpeta de descarga (obligatorio):</label>
+                    <div class="folder-selector">
+                        <input 
+                            type="text" 
+                            id="output_dir" 
+                            name="output_dir" 
+                            required
+                            placeholder="Ej: /Users/tuusuario/Downloads/musica"
+                            readonly
+                        >
+                        <input 
+                            type="file" 
+                            id="folderInput" 
+                            class="folder-input" 
+                            webkitdirectory 
+                            directory
+                        >
+                        <button type="button" class="folder-btn" onclick="selectFolder()">
+                            📂 Seleccionar Carpeta
+                        </button>
+                    </div>
+                    <small style="color: #666; font-size: 0.85rem;">
+                        💡 <strong>Selector nativo:</strong> Selecciona cualquier archivo dentro de la carpeta que quieras usar<br>
+                        ⚡ <strong>Rutas rápidas:</strong> 
+                        <button type="button" onclick="setQuickPath('~/Downloads')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Downloads</button> | 
+                        <button type="button" onclick="setQuickPath('~/Music')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Music</button> | 
+                        <button type="button" onclick="setQuickPath('~/Desktop')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Desktop</button>
+                    </small>
+                </div>
+                
+                <button type="submit" class="btn" id="downloadBtn">
+                    🚀 Iniciar Descarga
+                </button>
+                
+                <button type="button" class="btn btn-cancel" id="cancelBtn" style="display: none;">
+                    ❌ Cancelar Descarga
+                </button>
+            </form>
+            
+            <div id="statusContainer" class="status-container">
+                <div class="status">
+                    <div class="status-icon" id="statusIcon"></div>
+                    <strong id="statusText">Estado de descarga</strong>
+                </div>
+                
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                
+                <div id="jobInfo" style="margin-top: 10px; font-size: 0.9rem; color: #666;"></div>
+                
+                <div id="filesContainer" class="files-list" style="display: none;">
+                    <strong>✅ Archivos descargados:</strong>
+                    <div id="filesList"></div>
+                </div>
+                
+                <div id="logContainer" style="display: none;">
+                    <div class="log" id="logOutput"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
