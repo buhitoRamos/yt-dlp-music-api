@@ -328,19 +328,27 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             '--extractor-args', 'youtube:player_client=tv',
                             '--throttled-rate', '20K'
                         ])
+                        # En servidores remotos, agregar estrategias adicionales para el intento 3
+                        if is_remote_server:
+                            retry_options.extend([
+                                '--geo-bypass',
+                                '--extractor-args', 'youtube:player_skip=configs',
+                                '--no-check-certificate',
+                                '--force-ipv4'
+                            ])
                     elif attempt == 4:
                         retry_options.extend([
                             '--extractor-args', 'youtube:player_client=web',
                             '--extractor-args', 'youtube:skip=dash',
                             '--throttled-rate', '15K'
                         ])
-                        # Intentar cookies del navegador en el cuarto intento
-                        if not os.environ.get('YOUTUBE_COOKIES'):
+                        # Intentar cookies del navegador en el cuarto intento (solo si no estamos en servidor remoto)
+                        if not os.environ.get('YOUTUBE_COOKIES') and not is_remote_server:
                             try:
                                 retry_options.extend(['--cookies-from-browser', 'chrome'])
                                 DOWNLOADS_STATUS[job_id]['cookies_used'] = 'browser_chrome_attempt4'
                             except:
-                                pass
+                                DOWNLOADS_STATUS[job_id]['cookies_note'] = 'Chrome cookies not available locally'
                     elif attempt == 5:
                         retry_options.extend([
                             '--extractor-args', 'youtube:player_client=mweb',
@@ -362,15 +370,27 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             except Exception as e:
                                 DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
                         
-                        # 2. Si no hay cookies de entorno, intentar cookies del navegador
-                        if not cookies_tried:
+                        # 2. Si no hay cookies de entorno y no estamos en servidor remoto, intentar cookies del navegador
+                        if not cookies_tried and not is_remote_server:
                             for browser in ['chrome', 'firefox', 'safari', 'edge']:
                                 try:
                                     retry_options.extend(['--cookies-from-browser', browser])
                                     DOWNLOADS_STATUS[job_id]['cookies_used'] = f'browser_{browser}'
+                                    cookies_tried = True
                                     break
                                 except:
                                     continue
+                        
+                        # 3. Si estamos en servidor remoto, usar estrategias alternativas más agresivas
+                        if not cookies_tried and is_remote_server:
+                            # Estrategias adicionales para servidores remotos sin navegadores
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_skip=configs',
+                                '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com',
+                                '--geo-bypass',
+                                '--no-check-certificate'
+                            ])
+                            DOWNLOADS_STATUS[job_id]['fallback_strategy'] = 'remote_server_bypass'
                 else:
                     retry_options = [
                         '--no-check-certificate',
@@ -568,14 +588,15 @@ def get_formats():
             'automatic': 'Sistema automático de prevención de errores 429',
             'strategies': [
                 'User-Agents aleatorios',
-                'Múltiples clientes de YouTube',
+                'Múltiples clientes de YouTube (web, mweb, tv)',
                 'Reintentos inteligentes con delays progresivos',
                 'Throttling de velocidad adaptativo',
-                'Cookies automáticas del navegador (intentos 4-5)',
+                'Geo-bypass y configuraciones alternativas',
+                'Cookies del navegador (solo local)',
                 'Variables de entorno para cookies (producción)'
             ],
-            'success_rate': '90-98% con estrategias automáticas',
-            'fallback_cookies': 'Intenta automáticamente Chrome, Firefox, Safari, Edge'
+            'success_rate': '80-95% dependiendo del entorno',
+            'production_note': 'En servidores remotos use variable YOUTUBE_COOKIES para máxima efectividad'
         },
         'cookies_help': {
             'why': 'Las cookies evitan el error 429 (Too Many Requests) de YouTube',

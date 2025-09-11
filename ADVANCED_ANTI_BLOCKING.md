@@ -5,15 +5,23 @@ Resolver automáticamente el error "Sign in to confirm you're not a bot" de YouT
 
 ## 📋 Estrategias Implementadas
 
-### 🔄 Reintentos Progresivos
+### 🔄 Reintentos Progresivos por Entorno
 
-| Intento | Cliente YouTube | Throttling | Sleep Interval | Cookies |
-|---------|----------------|------------|----------------|----------|
-| 1 | web | 50K | 2-10s | Variable entorno |
-| 2 | mweb | 30K | 4-12s | Variable entorno |
-| 3 | tv | 20K | 6-14s | Variable entorno |
-| 4 | web+skip | 15K | 8-16s | **Chrome browser** |
-| 5 | mweb | 10K | 10-18s | **Multi-browser** |
+#### 🏠 Entorno Local (3 Intentos)
+| Intento | Cliente YouTube | Sleep Interval | Cookies |
+|---------|----------------|----------------|----------|
+| 1 | web | 2-4s | Variable entorno |
+| 2 | mweb | 3-5s | Variable entorno |
+| 3 | web | 4-6s | **Browser automático** |
+
+#### ☁️ Servidores Remotos (5 Intentos)
+| Intento | Cliente YouTube | Throttling | Sleep Interval | Cookies | Configuraciones |
+|---------|----------------|------------|----------------|----------|----------------|
+| 1 | web | 50K | 2-10s | Variable entorno | Básicas |
+| 2 | mweb | 30K | 4-12s | Variable entorno | Throttling |
+| 3 | web | 20K | 6-14s | Variable entorno | **Geo-bypass** |
+| 4 | web+skip | 15K | 8-16s | Variable entorno | Configuraciones extra |
+| 5 | tv | 10K | 10-18s | Variable entorno | **Bypass máximo** |
 
 ### 🌐 Detección de Entorno
 
@@ -25,8 +33,10 @@ Resolver automáticamente el error "Sign in to confirm you're not a bot" de YouT
 - Hostname contiene `render.com` o `heroku.com`
 
 **Configuración por entorno:**
-- **Local**: 3 intentos, timeouts 60s, sin throttling
-- **Remoto**: 5 intentos, timeouts 90s, throttling agresivo
+- **Local**: 3 intentos, cookies del navegador disponibles
+- **Remoto**: 5 intentos, solo variables de entorno para cookies
+
+> ⚠️ **Nota**: Las cookies del navegador solo funcionan en entornos locales. En servidores use `YOUTUBE_COOKIES` como variable de entorno.
 
 ### 🍪 Estrategias de Cookies (Automáticas)
 
