@@ -35,9 +35,15 @@ def api_info():
             'output_dir': '~/Downloads/musica',
             'format': 'mp3',
             'quality': '320K',
-            'naming': 'artist-title'
+            'naming': 'artist-title',
+            'cookies_file': 'cookies.txt'
         },
-        'required_fields': ['url', 'output_dir']
+        'required_fields': ['url', 'output_dir'],
+        'cookies_info': {
+            'note': 'Para evitar error 429 (Too Many Requests), usa cookies de YouTube',
+            'how_to': 'Exporta cookies.txt con la extensión "Get cookies.txt" desde youtube.com',
+            'placement': 'Coloca cookies.txt en la misma carpeta que este script'
+        }
     })
 
 @app.route('/')
@@ -75,6 +81,7 @@ def download():
         quality = data.get('quality', '0')  # 0=mejor, 320K, 256K, 128K
         naming = data.get('naming', 'artist-title')  # title, artist-title
         output_dir = data.get('output_dir')  # Ahora es obligatorio especificar la carpeta
+        cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
         
         # Validar que se especifique output_dir
         if not output_dir:
@@ -100,7 +107,7 @@ def download():
         }
         
         # Ejecutar descarga en hilo separado
-        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir))
+        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file))
         thread.daemon = True
         thread.start()
         
@@ -113,13 +120,29 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def download_worker(job_id, url, format_type, quality, naming, output_dir):
+def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None):
     try:
         # Actualizar estado
         DOWNLOADS_STATUS[job_id]['status'] = 'descargando'
         
         # Construir comando yt-dlp
         cmd = ['python3', '-m', 'yt_dlp']
+        
+        # Agregar cookies si se especifica el archivo
+        if cookies_file:
+            # Verificar si el archivo existe
+            if os.path.exists(cookies_file):
+                cmd.extend(['--cookies', cookies_file])
+                DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_file}'
+            else:
+                # Buscar en la carpeta actual del script
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                cookies_path = os.path.join(script_dir, cookies_file)
+                if os.path.exists(cookies_path):
+                    cmd.extend(['--cookies', cookies_path])
+                    DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_path}'
+                else:
+                    DOWNLOADS_STATUS[job_id]['warning'] = f'Archivo de cookies no encontrado: {cookies_file}'
         
         # Configurar formato
         if format_type == 'mp3':
@@ -230,6 +253,17 @@ def get_formats():
         'required_fields': {
             'url': 'URL del video o playlist (obligatorio)',
             'output_dir': 'Carpeta donde guardar los archivos (obligatorio)'
+        },
+        'optional_fields': {
+            'cookies_file': 'Archivo de cookies para evitar bloqueos (cookies.txt)'
+        },
+        'cookies_help': {
+            'why': 'Las cookies evitan el error 429 (Too Many Requests) de YouTube',
+            'how': '1. Instala la extensión "Get cookies.txt" en tu navegador',
+            'step2': '2. Ve a youtube.com e inicia sesión',
+            'step3': '3. Exporta las cookies a cookies.txt',
+            'step4': '4. Coloca cookies.txt en la misma carpeta que el script',
+            'usage': 'Agrega "cookies_file": "cookies.txt" a tu request'
         },
         'suggested_directories': {
             'downloads': '~/Downloads',

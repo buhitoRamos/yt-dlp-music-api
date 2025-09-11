@@ -1,0 +1,12 @@
+# Este es un archivo de ejemplo de cookies.txt
+# Para usar cookies reales:
+# 1. Instala la extensión "Get cookies.txt LOCALLY" en Chrome/Firefox
+# 2. Ve a youtube.com e inicia sesión
+# 3. Haz clic en la extensión y exporta las cookies
+# 4. Renombra el archivo a "cookies.txt" y colócalo aquí
+# 5. Usa "cookies_file": "cookies.txt" en tu request JSON
+
+# Las cookies reales tienen este formato:
+# .youtube.com	TRUE	/	TRUE	1234567890	CONSENT	YES+cb
+# .youtube.com	TRUE	/	FALSE	1234567890	VISITOR_INFO1_LIVE	abcdef123456
+# .youtube.com	TRUE	/	TRUE	1234567890	YSC	xyz789
