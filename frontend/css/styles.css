@@ -48,6 +48,18 @@ body {
     padding: 30px;
 }
 
+/* Banner informativo */
+.info-banner {
+    background: linear-gradient(135deg, #00c851, #00a843);
+    color: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+    margin-bottom: 25px;
+    text-align: center;
+    font-size: 0.95rem;
+    box-shadow: 0 2px 10px rgba(0, 200, 81, 0.2);
+}
+
 .form-group {
     margin-bottom: 20px;
 }
