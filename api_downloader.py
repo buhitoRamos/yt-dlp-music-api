@@ -201,6 +201,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Log del entorno detectado
         DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server' if is_remote_server else 'local_dev'
         
+        # Definir bandera para saltar intento de extracción de cookies de navegador
+        skip_browser_cookie_scan = False
         if is_remote_server:
             # Estrategias más agresivas para servidores remotos
             anti_429_options = [
@@ -237,25 +239,33 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 '--retries', '15'
             ]
             
-            # En local, intentar cookies del navegador automáticamente
+            # Decidir si podemos intentar cookies de navegador
+            skip_browser_cookie_scan = (
+                os.environ.get('DISABLE_BROWSER_COOKIES') == '1' or
+                os.environ.get('FORCE_LOCAL_NO_BROWSER') == '1' or
+                force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1'
+            )
             browser_cookies_added = False
-            for browser in ['chrome', 'firefox', 'safari', 'edge']:
-                try:
-                    # Intentar obtener cookies del navegador especificado
-                    test_cmd = ['python3', '-m', 'yt_dlp', '--cookies-from-browser', browser, '--simulate', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']
-                    test_process = subprocess.run(test_cmd, capture_output=True, timeout=10)
-                    if test_process.returncode == 0:
-                        anti_429_options.extend(['--cookies-from-browser', browser])
-                        DOWNLOADS_STATUS[job_id]['auto_cookies'] = f'Usando cookies de {browser}'
-                        browser_cookies_added = True
-                        break
-                except:
-                    continue
-            
+            if not skip_browser_cookie_scan:
+                for browser in ['chrome', 'firefox', 'safari', 'edge']:
+                    try:
+                        test_cmd = ['python3', '-m', 'yt_dlp', '--cookies-from-browser', browser, '--simulate', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']
+                        test_process = subprocess.run(test_cmd, capture_output=True, timeout=8)
+                        if test_process.returncode == 0:
+                            anti_429_options.extend(['--cookies-from-browser', browser])
+                            DOWNLOADS_STATUS[job_id]['auto_cookies'] = f'Usando cookies de {browser}'
+                            browser_cookies_added = True
+                            break
+                    except Exception as _e:
+                        continue
             if browser_cookies_added:
                 DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_with_browser_cookies'
             else:
-                DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
+                if skip_browser_cookie_scan:
+                    DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic_no_browser'
+                    DOWNLOADS_STATUS[job_id]['auto_cookies'] = 'omitido_scan_navegador'
+                else:
+                    DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
         
         cmd.extend(anti_429_options)
         
@@ -297,28 +307,23 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         
         # Mensaje informativo sobre cookies y nivel anti-bot
         elif not cookies_added and is_remote_server:
-            DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot avanzadas sin cookies'
-            # Si se está emulando local (force_local) generar cookie sintética
-            if force_local and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
+            DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot sin cookies'
+            # Cookie sintética si se emula local o se solicita explícitamente
+            if (force_local or os.environ.get('ALLOW_FAKE_COOKIE') == '1') and os.environ.get('USE_FAKE_CONSENT_COOKIE', '1') == '1':
                 try:
                     import tempfile
-                    fake_cookie_content = (
+                    fake_cookie_content = os.environ.get('FAKE_COOKIE_CONTENT', (
                         "# Netscape HTTP Cookie File\n"
                         ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tCONSENT\tYES+cb\n"
                         ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tPREF\tf1=50000000&tz=UTC\n"
-                    )
+                        ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tYSC\tRANDOM123TEST\n"
+                    ))
                     fake_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
                     fake_file.write(fake_cookie_content)
                     fake_file.close()
                     temp_cookies_path = fake_file.name
                     cmd.extend(['--cookies', temp_cookies_path])
-                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica_minima'
-                    DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookie sintética CONSENT (emulación local)'
-                except Exception as e:
-                    DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
-                    cmd.extend(['--cookies', temp_cookies_path])
-                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica_minima'
-                    DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookie sintética CONSENT (emulación local)'
+                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica'
                 except Exception as e:
                     DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
         else:
@@ -356,7 +361,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Intentar descarga con estrategias adaptadas al entorno y tipo de error
         success = False
         attempt = 1
-        max_attempts = 6 if is_remote_server else 4  # Más intentos para errores de bot
+        # Permitir intento adicional super agresivo (7) controlado por variable
+        enable_final_aggressive = os.environ.get('AGGRESSIVE_FINAL_ATTEMPT', '1') == '1'
+        max_attempts = (7 if (is_remote_server and enable_final_aggressive) else (6 if is_remote_server else (5 if enable_final_aggressive else 4)))
         
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
@@ -414,23 +421,51 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             '--throttled-rate', '15K'
                         ])
                     elif attempt == 6:
-                        # Último recurso: estrategia máxima anti-bot
                         retry_options.extend([
                             '--extractor-args', 'youtube:player_client=mediaconnect',
                             '--add-header', 'X-YouTube-Client-Name:3',
                             '--add-header', 'X-YouTube-Client-Version:17.31.35',
-                            '--throttled-rate', '10K'
+                            '--throttled-rate', '12K',
+                            '--add-header', 'Accept-Language: en-US,en;q=0.9',
+                            '--add-header', 'DNT: 1'
                         ])
-                        
-                        # Intentar cookies de entorno si están disponibles
-                        if os.environ.get('YOUTUBE_COOKIES'):
+                        if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
                             try:
                                 import tempfile
                                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                                     f.write(os.environ.get('YOUTUBE_COOKIES'))
                                     temp_cookies_path = f.name
                                 retry_options.extend(['--cookies', temp_cookies_path])
-                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'environment_final_attempt'
+                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt6'
+                            except Exception as e:
+                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                    elif attempt == 7:
+                        # Súper agresivo: combinar múltiples clientes y headers
+                        multi_clients = [
+                            '--extractor-args', 'youtube:player_client=tv',
+                            '--extractor-args', 'youtube:player_client=web',
+                            '--extractor-args', 'youtube:player_client=web_embedded',
+                            '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com'
+                        ]
+                        for mc in multi_clients:
+                            retry_options.append(mc)
+                        retry_options.extend([
+                            '--add-header', 'Origin: https://www.youtube.com',
+                            '--add-header', 'Referer: https://www.youtube.com/',
+                            '--add-header', 'Accept-Language: en-US,en;q=0.8',
+                            '--add-header', 'Sec-Fetch-Dest: empty',
+                            '--add-header', 'Sec-Fetch-Mode: cors',
+                            '--add-header', 'Sec-Fetch-Site: same-origin',
+                            '--throttled-rate', '8K'
+                        ])
+                        if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
+                            try:
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                    temp_cookies_path = f.name
+                                retry_options.extend(['--cookies', temp_cookies_path])
+                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt7'
                             except Exception as e:
                                 DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
                 else:
