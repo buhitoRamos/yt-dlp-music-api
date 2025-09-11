@@ -169,6 +169,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         
         # Estrategias anti-bot progresivas según el entorno
         random_ua = get_random_user_agent()
+        # Heurística: detectar si la URL es un Shorts (suelen disparar más verificación)
+        is_shorts = '/shorts/' in url
+        DOWNLOADS_STATUS[job_id]['content_type'] = 'shorts' if is_shorts else 'standard'
         
         # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
         is_remote_server_detected = any([
@@ -205,13 +208,15 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         skip_browser_cookie_scan = False
         if is_remote_server:
             # Estrategias más agresivas para servidores remotos
+            # Para Shorts empezamos con cliente móvil (mweb) que suele requerir menos challenge
+            base_player_client = 'mweb' if is_shorts else 'web'
             anti_429_options = [
                 '--no-check-certificate',
                 '--user-agent', random_ua,
                 '--referer', 'https://www.youtube.com/',
                 '--sleep-interval', '3',
                 '--max-sleep-interval', '12',
-                '--extractor-args', 'youtube:player_client=web',
+                '--extractor-args', f'youtube:player_client={base_player_client}',
                 '--extractor-args', 'youtube:skip=dash,hls',
                 '--no-warnings',
                 '--ignore-errors',
@@ -222,6 +227,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 '--geo-bypass',
                 '--geo-bypass-country', 'US'
             ]
+            if is_shorts:
+                # Añadir algunos headers ligeros extra desde el inicio para Shorts
+                anti_429_options.extend([
+                    '--add-header', 'Accept-Language: en-US,en;q=0.9',
+                    '--add-header', 'DNT: 1'
+                ])
             DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'server_aggressive'
         else:
             # Estrategias normales para desarrollo local + cookies automáticas
@@ -394,80 +405,151 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                         '--geo-bypass',
                         '--geo-bypass-country', 'US'
                     ]
-                    
-                    # Estrategias específicas por intento para servidores
-                    if attempt == 2:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=mweb',
-                            '--throttled-rate', '40K'
-                        ])
-                    elif attempt == 3:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=tv',
-                            '--extractor-args', 'youtube:skip=dash,hls',
-                            '--throttled-rate', '30K'
-                        ])
-                    elif attempt == 4:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=web',
-                            '--extractor-args', 'youtube:skip=dash',
-                            '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com',
-                            '--throttled-rate', '20K'
-                        ])
-                    elif attempt == 5:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=tv_embedded',
-                            '--extractor-args', 'youtube:player_skip=configs',
-                            '--throttled-rate', '15K'
-                        ])
-                    elif attempt == 6:
-                        retry_options.extend([
-                            '--extractor-args', 'youtube:player_client=mediaconnect',
-                            '--add-header', 'X-YouTube-Client-Name:3',
-                            '--add-header', 'X-YouTube-Client-Version:17.31.35',
-                            '--throttled-rate', '12K',
-                            '--add-header', 'Accept-Language: en-US,en;q=0.9',
-                            '--add-header', 'DNT: 1'
-                        ])
-                        if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
-                            try:
-                                import tempfile
-                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
-                                    temp_cookies_path = f.name
-                                retry_options.extend(['--cookies', temp_cookies_path])
-                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt6'
-                            except Exception as e:
-                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
-                    elif attempt == 7:
-                        # Súper agresivo: combinar múltiples clientes y headers
-                        multi_clients = [
-                            '--extractor-args', 'youtube:player_client=tv',
-                            '--extractor-args', 'youtube:player_client=web',
-                            '--extractor-args', 'youtube:player_client=web_embedded',
-                            '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com'
-                        ]
-                        for mc in multi_clients:
-                            retry_options.append(mc)
-                        retry_options.extend([
-                            '--add-header', 'Origin: https://www.youtube.com',
-                            '--add-header', 'Referer: https://www.youtube.com/',
-                            '--add-header', 'Accept-Language: en-US,en;q=0.8',
-                            '--add-header', 'Sec-Fetch-Dest: empty',
-                            '--add-header', 'Sec-Fetch-Mode: cors',
-                            '--add-header', 'Sec-Fetch-Site: same-origin',
-                            '--throttled-rate', '8K'
-                        ])
-                        if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
-                            try:
-                                import tempfile
-                                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                                    f.write(os.environ.get('YOUTUBE_COOKIES'))
-                                    temp_cookies_path = f.name
-                                retry_options.extend(['--cookies', temp_cookies_path])
-                                DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt7'
-                            except Exception as e:
-                                DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+
+                    # Estrategias específicas por intento para servidores (diferenciando Shorts)
+                    if is_shorts:
+                        if attempt == 2:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=tv_embedded',
+                                '--extractor-args', 'youtube:player_skip=configs',
+                                '--throttled-rate', '35K'
+                            ])
+                        elif attempt == 3:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=web_embedded',
+                                '--throttled-rate', '30K'
+                            ])
+                        elif attempt == 4:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=mweb',
+                                '--throttled-rate', '25K'
+                            ])
+                        elif attempt == 5:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=tv',
+                                '--extractor-args', 'youtube:skip=dash,hls',
+                                '--throttled-rate', '18K'
+                            ])
+                        elif attempt == 6:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=mediaconnect',
+                                '--add-header', 'X-YouTube-Client-Name:3',
+                                '--add-header', 'X-YouTube-Client-Version:17.31.35',
+                                '--throttled-rate', '12K',
+                                '--add-header', 'Accept-Language: en-US,en;q=0.9',
+                                '--add-header', 'DNT: 1'
+                            ])
+                            if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
+                                try:
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                        f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                        temp_cookies_path = f.name
+                                    retry_options.extend(['--cookies', temp_cookies_path])
+                                    DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt6'
+                                except Exception as e:
+                                    DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                        elif attempt == 7:
+                            multi_clients = [
+                                '--extractor-args', 'youtube:player_client=tv',
+                                '--extractor-args', 'youtube:player_client=web',
+                                '--extractor-args', 'youtube:player_client=web_embedded',
+                                '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com'
+                            ]
+                            for mc in multi_clients:
+                                retry_options.append(mc)
+                            retry_options.extend([
+                                '--add-header', 'Origin: https://www.youtube.com',
+                                '--add-header', 'Referer: https://www.youtube.com/',
+                                '--add-header', 'Accept-Language: en-US,en;q=0.8',
+                                '--add-header', 'Sec-Fetch-Dest: empty',
+                                '--add-header', 'Sec-Fetch-Mode: cors',
+                                '--add-header', 'Sec-Fetch-Site: same-origin',
+                                '--throttled-rate', '8K'
+                            ])
+                            if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
+                                try:
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                        f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                        temp_cookies_path = f.name
+                                    retry_options.extend(['--cookies', temp_cookies_path])
+                                    DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt7'
+                                except Exception as e:
+                                    DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                    else:
+                        # Secuencia original para videos estándar
+                        if attempt == 2:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=mweb',
+                                '--throttled-rate', '40K'
+                            ])
+                        elif attempt == 3:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=tv',
+                                '--extractor-args', 'youtube:skip=dash,hls',
+                                '--throttled-rate', '30K'
+                            ])
+                        elif attempt == 4:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=web',
+                                '--extractor-args', 'youtube:skip=dash',
+                                '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com',
+                                '--throttled-rate', '20K'
+                            ])
+                        elif attempt == 5:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=tv_embedded',
+                                '--extractor-args', 'youtube:player_skip=configs',
+                                '--throttled-rate', '15K'
+                            ])
+                        elif attempt == 6:
+                            retry_options.extend([
+                                '--extractor-args', 'youtube:player_client=mediaconnect',
+                                '--add-header', 'X-YouTube-Client-Name:3',
+                                '--add-header', 'X-YouTube-Client-Version:17.31.35',
+                                '--throttled-rate', '12K',
+                                '--add-header', 'Accept-Language: en-US,en;q=0.9',
+                                '--add-header', 'DNT: 1'
+                            ])
+                            if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
+                                try:
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                        f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                        temp_cookies_path = f.name
+                                    retry_options.extend(['--cookies', temp_cookies_path])
+                                    DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt6'
+                                except Exception as e:
+                                    DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
+                        elif attempt == 7:
+                            multi_clients = [
+                                '--extractor-args', 'youtube:player_client=tv',
+                                '--extractor-args', 'youtube:player_client=web',
+                                '--extractor-args', 'youtube:player_client=web_embedded',
+                                '--extractor-args', 'youtube:innertube_host=youtubei.googleapis.com'
+                            ]
+                            for mc in multi_clients:
+                                retry_options.append(mc)
+                            retry_options.extend([
+                                '--add-header', 'Origin: https://www.youtube.com',
+                                '--add-header', 'Referer: https://www.youtube.com/',
+                                '--add-header', 'Accept-Language: en-US,en;q=0.8',
+                                '--add-header', 'Sec-Fetch-Dest: empty',
+                                '--add-header', 'Sec-Fetch-Mode: cors',
+                                '--add-header', 'Sec-Fetch-Site: same-origin',
+                                '--throttled-rate', '8K'
+                            ])
+                            if os.environ.get('YOUTUBE_COOKIES') and not cookies_added:
+                                try:
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                                        f.write(os.environ.get('YOUTUBE_COOKIES'))
+                                        temp_cookies_path = f.name
+                                    retry_options.extend(['--cookies', temp_cookies_path])
+                                    DOWNLOADS_STATUS[job_id]['cookies_used'] = 'env_attempt7'
+                                except Exception as e:
+                                    DOWNLOADS_STATUS[job_id]['cookies_error'] = str(e)
                 else:
                     # Estrategias para entorno local con cookies automáticas
                     retry_options = [
