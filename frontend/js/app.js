@@ -313,30 +313,46 @@ function updateStatusDisplay(status) {
 async function autoSaveAndCleanup(status) {
     try {
         const urls = status.download_urls || [];
-        if (!urls.length || !localDirectoryHandle) return;
-        let saved = 0;
-        for (let i=0;i<urls.length;i++) {
-            const u = urls[i];
-            const resp = await fetch(u);
-            if (!resp.ok) continue;
-            const blob = await resp.blob();
-            const serverPath = (status.files && status.files[i]) || `file_${i}`;
-            const baseName = serverPath.split('/').pop();
-            const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
-            const writable = await fileHandle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-            saved++;
-        }
-        showTemporaryMessage(`💾 Guardados localmente ${saved}/${urls.length}`);
-        // Intentar limpieza remota automática si hay job
-        if (currentJobId) {
-            try {
-                await fetch(`${API_BASE}/cleanup/${currentJobId}`, {method:'POST'});
-                showTemporaryMessage('🧹 Archivos temporales limpiados del servidor');
-            } catch(e) {
-                console.warn('Cleanup remoto falló', e);
+        if (!urls.length) return;
+        if (!localDirectoryHandle) {
+            // Fallback: crear enlaces de descarga visibles si no hay permiso de carpeta
+            console.warn('Sin handle de carpeta: modo fallback');
+            const list = document.getElementById('filesList');
+            if (list) {
+                list.innerHTML = '';
+                (status.files || []).forEach((f, i)=>{
+                    const a = document.createElement('a');
+                    a.href = urls[i];
+                    a.textContent = f.split('/').pop();
+                    a.download = f.split('/').pop();
+                    a.style.display='block';
+                    list.appendChild(a);
+                });
             }
+            return;
+        }
+        let saved = 0; let failed = 0;
+        for (let i=0;i<urls.length;i++) {
+            const baseServerPath = (status.files && status.files[i]) || `file_${i}`;
+            const baseName = baseServerPath.split('/').pop();
+            try {
+                const u = urls[i] + '?delete=1'; // pedir borrado tras servir
+                const resp = await fetch(u);
+                if (!resp.ok) throw new Error('Resp '+resp.status);
+                const blob = await resp.blob();
+                const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
+                const writable = await fileHandle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                saved++;
+            } catch(err) {
+                console.error('Fallo guardando', baseName, err);
+                failed++;
+            }
+        }
+        showTemporaryMessage(`💾 Guardados: ${saved} | Fallidos: ${failed}`);
+        if (failed === 0) {
+            lastStatusCache.files = []; // ya borrados en servidor
         }
     } catch(e) {
         console.warn('Auto save failed', e);
