@@ -203,20 +203,32 @@ def download():
         format_type = data.get('format', 'mp3')  # mp3, mp4, best
         quality = data.get('quality', '0')  # 0=mejor, 320K, 256K, 128K
         naming = data.get('naming', 'artist-title')  # title, artist-title
-        output_dir = data.get('output_dir')  # Ahora es obligatorio especificar la carpeta
+        output_dir_raw = data.get('output_dir')  # Ahora es obligatorio especificar la carpeta
+        output_dir = None
         cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
         force_local = str(data.get('force_local', '0')) in ['1', 'true', 'True']
         force_remote = str(data.get('force_remote', '0')) in ['1', 'true', 'True']
         
         # Validar que se especifique output_dir
-        if not output_dir:
+        if not output_dir_raw:
             return jsonify({
                 'error': 'output_dir es obligatorio. Especifica la carpeta donde guardar los archivos',
                 'ejemplo': {'output_dir': '/Users/tuusuario/Downloads/musica'}
             }), 400
+        # Expandir ~ y variables de entorno de forma segura
+        try:
+            expanded = os.path.expanduser(os.path.expandvars(output_dir_raw.strip()))
+            if not expanded:
+                raise ValueError('Ruta vacía tras expansión')
+            output_dir = expanded
+        except Exception as e:
+            return jsonify({'error':'No se pudo expandir output_dir','detalle':str(e)}), 400
         
         # Crear directorio si no existe
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            return jsonify({'error':'No se pudo crear la carpeta destino','detalle':str(e),'ruta':output_dir}), 400
         
         # Generar ID único para el trabajo
         job_id = f"job_{int(time.time())}_{len(DOWNLOADS_STATUS)}"
@@ -228,7 +240,9 @@ def download():
             'created_at': datetime.now().isoformat(),
             'progress': 0,
             'files': [],
-            'error': None
+            'error': None,
+            'requested_output_dir': output_dir_raw,
+            'resolved_output_dir': output_dir
         }
         
         # Ejecutar descarga en hilo separado
@@ -964,7 +978,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             # Determinar archivos nuevos comparando con snapshot inicial
             downloaded_files = []
             try:
-                final_listing = set(os.listdir(output_dir))
+                # Usar siempre la ruta resuelta (por si ~ fue expandido)
+                resolved_dir = DOWNLOADS_STATUS[job_id].get('resolved_output_dir', output_dir)
+                final_listing = set(os.listdir(resolved_dir))
                 new_files = [f for f in final_listing - initial_files_snapshot if f.lower().endswith(('.mp3','.mp4','.webm','.m4a','.info.json'))]
                 # Priorizar: audio/video principal primero, luego info.json
                 def sort_key(name):
@@ -972,14 +988,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     if name.endswith(('.mp3','.m4a')): return (0, name)
                     return (1, name)
                 new_files.sort(key=sort_key)
-                downloaded_files = [os.path.join(output_dir, f) for f in new_files]
+                downloaded_files = [os.path.join(resolved_dir, f) for f in new_files]
             except Exception as e:
                 DOWNLOADS_STATUS[job_id]['file_diff_error'] = str(e)
                 # Fallback a listado completo
                 try:
-                    for file in os.listdir(output_dir):
+                    for file in os.listdir(resolved_dir):
                         if file.endswith(('.mp3', '.mp4', '.webm', '.m4a')):
-                            downloaded_files.append(os.path.join(output_dir, file))
+                            downloaded_files.append(os.path.join(resolved_dir, file))
                 except Exception:
                     pass
 
@@ -1070,8 +1086,30 @@ def get_status(job_id):
     status = DOWNLOADS_STATUS[job_id].copy()
     if 'process' in status:
         del status['process']
+    # Incluir URLs de descarga si se han generado archivos
+    files = status.get('files') or []
+    if files:
+        base_urls = []
+        for idx, _f in enumerate(files):
+            base_urls.append(f"/file/{job_id}/{idx}")
+        status['download_urls'] = base_urls
     
     return jsonify(status)
+
+@app.route('/file/<job_id>/<int:index>', methods=['GET'])
+def serve_downloaded_file(job_id, index):
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    files = DOWNLOADS_STATUS[job_id].get('files') or []
+    if index < 0 or index >= len(files):
+        return jsonify({'error':'Índice inválido'}), 400
+    path = files[index]
+    if not os.path.exists(path):
+        return jsonify({'error':'Archivo no existe en servidor'}), 404
+    try:
+        return send_file(path, as_attachment=True)
+    except Exception as e:
+        return jsonify({'error':'No se pudo enviar el archivo','detalle':str(e)}), 500
 
 @app.route('/upload-cookies', methods=['POST'])
 def upload_cookies():
