@@ -13,6 +13,11 @@ from datetime import datetime
 # Configuración
 DEFAULT_OUTPUT_DIR = "/Users/O002545/Music/playlist"
 DOWNLOADS_STATUS = {}
+GLOBAL_METRICS = {
+    'status_requests': 0,
+    'download_requests': 0,
+    'active_jobs_peak': 0
+}
 
 # Caché sencilla de último cliente exitoso por tipo de contenido
 CLIENT_CACHE = {}
@@ -274,7 +279,51 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             initial_files_snapshot = set()
 
         # Flags de características avanzadas (pack completo)
-        enable_prefetch = os.environ.get('ENABLE_PREFETCH', '1') == '1'
+        # Prefetch control:
+        # New environment variables:
+        #   PREFETCH_MODE: off | fast | full | auto (default auto)
+        #       off  -> nunca hace prefetch
+        #       fast -> solo intento simple (prefetch_metadata) sin multi_prefetch
+        #       full -> intenta prefetch + multi_prefetch
+        #       auto -> salta prefetch para playlists (porque añade mucha latencia y a menudo timeouts),
+        #                para un solo video hace modo 'fast'
+        #   PREFETCH_TIMEOUT: seg para timeout (-m yt_dlp --dump-json) (default 12 single, 18 legacy if not set)
+        prefetch_mode = os.environ.get('PREFETCH_MODE', 'auto').lower().strip()
+        raw_prefetch_timeout = os.environ.get('PREFETCH_TIMEOUT')
+        # Heurística playlist (query param list= o /playlist?)
+        is_playlist = ('list=' in url) or ('/playlist?' in url)
+        # Definir si habilitamos prefetch según modo
+        if prefetch_mode not in ('off','fast','full','auto'):
+            prefetch_mode = 'auto'
+        if prefetch_mode == 'off':
+            enable_prefetch = False
+        elif prefetch_mode == 'auto':
+            # Auto: saltar prefetch para playlists grandes; hacerlo modo fast para single
+            enable_prefetch = not is_playlist
+        else:
+            enable_prefetch = True
+        # Ajustar tipo de prefetch (fast vs full)
+        prefetch_full = (prefetch_mode == 'full') or (prefetch_mode == 'auto' and not is_playlist)
+        if prefetch_mode == 'fast':
+            prefetch_full = False  # solo intento simple
+        # Timeout dinámico
+        if raw_prefetch_timeout and raw_prefetch_timeout.isdigit():
+            prefetch_timeout = int(raw_prefetch_timeout)
+        else:
+            prefetch_timeout = 12 if not is_playlist else 16  # reducir single video para acelerar
+
+        DOWNLOADS_STATUS[job_id]['prefetch_mode'] = prefetch_mode
+        DOWNLOADS_STATUS[job_id]['is_playlist'] = is_playlist
+        # Controles de reducción de salida / límites
+        reduce_output = os.environ.get('REDUCE_OUTPUT','0') == '1'
+        playlist_limit_env = os.environ.get('PLAYLIST_LIMIT')
+        single_item_mode = os.environ.get('SINGLE_ITEM','0') == '1'
+        if reduce_output:
+            DOWNLOADS_STATUS[job_id]['reduction'] = 'reduced'
+        if playlist_limit_env and playlist_limit_env.isdigit():
+            DOWNLOADS_STATUS[job_id]['playlist_limit'] = int(playlist_limit_env)
+        if single_item_mode:
+            DOWNLOADS_STATUS[job_id]['single_item_mode'] = True
         enable_cache = os.environ.get('ENABLE_CLIENT_CACHE', '1') == '1'
         mobile_first = os.environ.get('USE_MOBILE_FIRST', '1') == '1'
         head_validate = os.environ.get('HEAD_VALIDATE', '1') == '1'
@@ -296,7 +345,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         head_ok = None
         first_audio_url = None
         if enable_prefetch:
-            data, err = prefetch_metadata(url)
+            # Intento simple
+            try:
+                data, err = prefetch_metadata(url, timeout=prefetch_timeout)
+            except TypeError:
+                # Compatibilidad si firma anterior sin timeout param
+                data, err = prefetch_metadata(url)
             if data:
                 prefetch_data = data
                 DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok'
@@ -315,26 +369,35 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 if err:
                     prefetch_error = err
                     DOWNLOADS_STATUS[job_id]['prefetch_error'] = err
-                # Multi-prefetch fallback si falla el primero
-                mp_clients = ['web','mweb','tv_embedded','web_embedded']
-                mp_data, mp_client, mp_err = multi_prefetch(url, mp_clients)
-                if mp_data:
-                    prefetch_data = mp_data
-                    DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok_multi'
-                    DOWNLOADS_STATUS[job_id]['prefetch_client'] = mp_client
-                    DOWNLOADS_STATUS[job_id]['prefetch_title'] = mp_data.get('title','')[:120]
-                    DOWNLOADS_STATUS[job_id]['prefetch_duration'] = mp_data.get('duration')
-                    try:
-                        fmts = mp_data.get('formats') or []
-                        audio_only = [f for f in fmts if f.get('vcodec') in (None,'none') and f.get('acodec') not in (None,'none')]
-                        audio_only.sort(key=lambda f: f.get('abr',0), reverse=True)
-                        if audio_only:
-                            first_audio_url = audio_only[0].get('url')
-                    except Exception:
-                        pass
-                else:
-                    if mp_err:
-                        DOWNLOADS_STATUS[job_id]['prefetch_multi_error'] = mp_err
+                if prefetch_full:
+                    # Multi-prefetch fallback solo si modo full
+                    mp_clients = ['web','mweb','tv_embedded','web_embedded']
+                    mp_data, mp_client, mp_err = multi_prefetch(url, mp_clients)
+                    if mp_data:
+                        prefetch_data = mp_data
+                        DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok_multi'
+                        DOWNLOADS_STATUS[job_id]['prefetch_client'] = mp_client
+                        DOWNLOADS_STATUS[job_id]['prefetch_title'] = mp_data.get('title','')[:120]
+                        DOWNLOADS_STATUS[job_id]['prefetch_duration'] = mp_data.get('duration')
+                        try:
+                            fmts = mp_data.get('formats') or []
+                            audio_only = [f for f in fmts if f.get('vcodec') in (None,'none') and f.get('acodec') not in (None,'none')]
+                            audio_only.sort(key=lambda f: f.get('abr',0), reverse=True)
+                            if audio_only:
+                                first_audio_url = audio_only[0].get('url')
+                        except Exception:
+                            pass
+                    else:
+                        if mp_err:
+                            DOWNLOADS_STATUS[job_id]['prefetch_multi_error'] = mp_err
+        else:
+            DOWNLOADS_STATUS[job_id]['prefetch'] = 'skipped'
+            if is_playlist:
+                DOWNLOADS_STATUS[job_id]['prefetch_reason'] = 'auto_skip_playlist'
+            elif prefetch_mode == 'off':
+                DOWNLOADS_STATUS[job_id]['prefetch_reason'] = 'disabled_env'
+            else:
+                DOWNLOADS_STATUS[job_id]['prefetch_reason'] = 'mode_fast_no_prefetch_needed'
         # Validación HEAD parcial si habilitado y tenemos URL de audio
         if head_validate and first_audio_url:
             head_ok = head_validate_small(first_audio_url)
@@ -490,12 +553,32 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
 
         output_template = os.path.join(output_dir, template)
         cmd.extend(['-o', output_template])
+
+        # Aplicar límites de playlist / single item
+        if single_item_mode:
+            cmd.append('--no-playlist')
+        else:
+            if playlist_limit_env and playlist_limit_env.isdigit():
+                # Si es playlist, limitar el final
+                if is_playlist:
+                    cmd.extend(['--playlist-end', playlist_limit_env])
         
         # Agregar opciones adicionales (en fast_mode omitimos write-info-json para velocidad)
         if fast_mode:
-            cmd.extend(['--no-playlist' if 'playlist' not in url else ''])
+            if not is_playlist:
+                cmd.append('--no-playlist')
         else:
-            cmd.extend(['--write-info-json', '--no-playlist' if 'playlist' not in url else ''])
+            if not reduce_output:
+                cmd.append('--write-info-json')
+            # Si reduce_output, evitar metadata pesada
+            if reduce_output:
+                cmd.append('--no-write-playlist-metafiles')
+            if not is_playlist:
+                cmd.append('--no-playlist')
+        # Archivo de registro de descargas para saltar ítems ya procesados
+        if os.environ.get('DOWNLOAD_ARCHIVE','0') == '1':
+            archive_path = os.path.join(output_dir, '.downloaded.txt')
+            cmd.extend(['--download-archive', archive_path])
         cmd = [x for x in cmd if x]  # Remover strings vacíos
         
         cmd.append(url)
@@ -776,6 +859,18 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                                 DOWNLOADS_STATUS[job_id]['cookies_attempt'] = 'file_attempt4'
                 
                 cmd_retry.extend(retry_options)
+                # Ajustes especiales si venimos de un error de tab parse (playlist Music)
+                if DOWNLOADS_STATUS[job_id].get('tab_parse_recovery'):
+                    # Evitar duplicar banderas; añadir combinación de clientes alternativos y flat-playlist
+                    recovery_flags = [
+                        '--flat-playlist',
+                        '--extractor-args', 'youtube:player_client=web',
+                        '--extractor-args', 'youtube:player_client=android'
+                    ]
+                    for rf in recovery_flags:
+                        if rf not in cmd_retry:
+                            cmd_retry.append(rf)
+                    DOWNLOADS_STATUS[job_id]['recovery_injected'] = True
                 # Asignar proxy rotativo
                 if proxies:
                     idx = (attempt - 1) % len(proxies) if rotate_proxies else 0
@@ -791,7 +886,21 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     cmd_retry.extend(['-f', 'best'])
                 
                 cmd_retry.extend(['-o', output_template])
-                cmd_retry.extend(['--write-info-json', '--no-playlist' if 'playlist' not in url else ''])
+                # Reaplicar banderas de reducción/playlist en reintentos
+                if not fast_mode and not reduce_output:
+                    cmd_retry.append('--write-info-json')
+                if reduce_output:
+                    cmd_retry.append('--no-write-playlist-metafiles')
+                if single_item_mode:
+                    cmd_retry.append('--no-playlist')
+                else:
+                    if not is_playlist:
+                        cmd_retry.append('--no-playlist')
+                    elif playlist_limit_env and playlist_limit_env.isdigit():
+                        cmd_retry.extend(['--playlist-end', playlist_limit_env])
+                if os.environ.get('DOWNLOAD_ARCHIVE','0') == '1':
+                    archive_path = os.path.join(output_dir, '.downloaded.txt')
+                    cmd_retry.extend(['--download-archive', archive_path])
                 cmd_retry = [x for x in cmd_retry if x]
                 cmd_retry.append(url)
                 
@@ -840,11 +949,29 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 error_is_general_block = any([
                     'Unable to download webpage' in stderr,
                     'HTTP Error 403' in stderr,
-                    'This video is not available' in stderr
+                    'This video is not available' in stderr,
+                    'Unable to recognize tab page' in stderr
                 ])
+                if 'Unable to recognize tab page' in stderr:
+                    DOWNLOADS_STATUS[job_id]['tab_parse_detected'] = True
                 
                 # Si es error de verificación de bot, 429 o bloqueo general, intentar de nuevo / o activar fallback
                 if (error_is_bot_check or error_is_429 or error_is_general_block):
+                    # Manejo especializado para error de tab page (playlist Music)
+                    tab_parse_issue = 'tab_parse_detected' in DOWNLOADS_STATUS[job_id]
+                    if tab_parse_issue and 'tab_parse_recovery' not in DOWNLOADS_STATUS[job_id]:
+                        DOWNLOADS_STATUS[job_id]['tab_parse_recovery'] = True
+                        # Forzar expansión si está en modo estricto y aún en intento 1
+                        if strict_two_attempts and allow_fallback and attempt == 1 and not fallback_engaged:
+                            fallback_engaged = True
+                            strict_two_attempts = False
+                            max_attempts = 6 if is_remote_server else 4
+                            DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
+                            DOWNLOADS_STATUS[job_id]['fallback_engaged'] = True
+                            DOWNLOADS_STATUS[job_id]['fallback_reason'] = 'tab_parse_force_expand'
+                            DOWNLOADS_STATUS[job_id]['strict_two_attempts'] = False
+                        # Inyectar pista para próximo retry afinando extractor-args (se aplicará al construir cmd_retry)
+                        DOWNLOADS_STATUS[job_id]['status'] = 'recuperando tab parse'
                     # Fallback: si estamos en modo estricto, es intento 1, y es bot_verification, ampliamos attempts si permitido
                     if (error_is_bot_check and strict_two_attempts and allow_fallback and attempt == 1 and not fallback_engaged):
                         fallback_engaged = True
@@ -992,7 +1119,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
 @app.route('/environment', methods=['GET'])
 def get_environment_info():
     """Obtener información del entorno y estrategias aplicadas"""
-    
+    GLOBAL_METRICS['download_requests'] += 1
     # Detectar entorno
     is_remote_server = any([
         os.environ.get('RENDER'),
@@ -1003,6 +1130,15 @@ def get_environment_info():
         'heroku.com' in os.environ.get('HOSTNAME', '')
     ])
     
+    # Versiones
+    yt_dlp_version = None
+    try:
+        import yt_dlp as _yt
+        yt_dlp_version = getattr(_yt, '__version__', 'unknown')
+    except Exception as _e:
+        yt_dlp_version = f'error:{_e.__class__.__name__}'
+    import sys as _sys
+
     env_info = {
         'environment': 'remote_server' if is_remote_server else 'local_development',
         'platform_detected': [],
@@ -1014,7 +1150,9 @@ def get_environment_info():
             'retries': '20' if is_remote_server else '10'
         },
         'cookies_available': bool(os.environ.get('YOUTUBE_COOKIES')),
-        'hostname': os.environ.get('HOSTNAME', 'unknown')
+        'hostname': os.environ.get('HOSTNAME', 'unknown'),
+        'python_version': _sys.version.split(' ')[0],
+        'yt_dlp_version': yt_dlp_version
     }
     
     # Detectar plataformas específicas
@@ -1049,7 +1187,29 @@ def get_status(job_id):
     else:
         status['cleanup_available'] = False
     
+    # Contador de polls a nivel global y por job
+    GLOBAL_METRICS['status_requests'] += 1
+    job_stats = DOWNLOADS_STATUS[job_id]
+    job_stats['status_polls'] = job_stats.get('status_polls', 0) + 1
+    status['status_polls'] = job_stats['status_polls']
     return jsonify(status)
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    # Calcular métricas agregadas sencillas
+    active = sum(1 for v in DOWNLOADS_STATUS.values() if v.get('status') not in ('completado','error','cancelado'))
+    GLOBAL_METRICS['active_jobs_peak'] = max(GLOBAL_METRICS.get('active_jobs_peak',0), active)
+    # Resumen por estados
+    states = {}
+    for v in DOWNLOADS_STATUS.values():
+        st = v.get('status','unknown')
+        states[st] = states.get(st,0)+1
+    return jsonify({
+        'global': GLOBAL_METRICS,
+        'states': states,
+        'jobs_total': len(DOWNLOADS_STATUS),
+        'timestamp': datetime.utcnow().isoformat()+'Z'
+    })
 
 @app.route('/file/<job_id>/<int:index>', methods=['GET'])
 def serve_downloaded_file(job_id, index):

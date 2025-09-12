@@ -3,9 +3,12 @@
 // Configuración de la API
 const API_BASE = window.location.origin;
 let currentJobId = null;
-let statusInterval = null;
+let statusInterval = null; // (legacy - mantenido por compatibilidad)
 let localDirectoryHandle = null; // File System Access API directory handle
 let lastStatusCache = null;
+let pollTimer = null;
+const POLL_STEPS = [2000, 4000, 6000]; // escalado progresivo 2s -> 4s -> 6s
+let pollStepIndex = 0;
 
 // Helper para pedir permisos explícitos si el navegador exige 'user activation'
 async function ensureDirectoryWritePermission() {
@@ -34,6 +37,60 @@ async function ensureDirectoryWritePermission() {
 }
 
 // (Simplificado) Eliminadas funciones antiguas de selección manual y manipulación de rutas locales.
+
+// --- Adaptive Polling Backoff ---
+// Estrategia: iniciar en 2s; si attempt >=2 o polls >3 pasa a 4s; luego a 6s tras polls >8.
+function startAdaptivePolling() {
+    clearPolling();
+    pollStepIndex = 0;
+    scheduleNextPoll(true);
+}
+
+function clearPolling() {
+    if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+function scheduleNextPoll(immediate=false) {
+    if (!currentJobId) return;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    const delay = POLL_STEPS[Math.min(pollStepIndex, POLL_STEPS.length-1)];
+    if (immediate) {
+        checkStatus();
+    } else {
+        pollTimer = setTimeout(checkStatus, delay);
+    }
+}
+
+async function checkStatus() {
+    if (!currentJobId) return;
+    try {
+        const response = await fetch(`${API_BASE}/status/${currentJobId}`);
+        const status = await response.json();
+        updateStatusDisplay(status);
+        const done = ['completado','error','cancelado'].includes(status.status);
+        if (done) {
+            clearPolling();
+            resetButton();
+            return;
+        }
+        // Evolución del backoff
+        try {
+            const polls = status.status_polls || 0;
+            const attempt = status.attempt || 1;
+            const nextIndex = pollStepIndex + 1;
+            if (nextIndex < POLL_STEPS.length) {
+                if (attempt >= 2 || polls >= (pollStepIndex === 0 ? 3 : 8)) {
+                    pollStepIndex = nextIndex;
+                }
+            }
+        } catch(e) { /* noop */ }
+        scheduleNextPoll();
+    } catch (err) {
+        console.warn('Status poll error', err);
+        scheduleNextPoll();
+    }
+}
 
 // Inicializar eventos cuando se carga la página
 document.addEventListener('DOMContentLoaded', function() {
@@ -138,8 +195,8 @@ document.addEventListener('DOMContentLoaded', function() {
             delete data.quality; // backend puede usar mejor calidad por defecto para video
         }
         // Añadir flags avanzados
-    const fl = document.getElementById('force_local'); // Puede no existir tras simplificación
-    if (fl) data.force_local = fl.checked ? '1' : '0';
+        const fl = document.getElementById('force_local'); // Puede no existir tras simplificación
+        if (fl) data.force_local = fl.checked ? '1' : '0';
         
         // Mostrar estado inicial
         showStatus('loading', 'Iniciando descarga...');
@@ -168,9 +225,8 @@ document.addEventListener('DOMContentLoaded', function() {
             if (response.ok) {
                 currentJobId = result.job_id;
                 document.getElementById('jobInfo').textContent = `Job ID: ${currentJobId}`;
-                
-                // Iniciar polling del estado
-                statusInterval = setInterval(checkStatus, 2000);
+                // Iniciar polling adaptativo
+                startAdaptivePolling();
                 // Limpiar panel de estrategia anterior
                 const stratBox = document.getElementById('strategyInfo');
                 if (stratBox) { stratBox.innerHTML=''; stratBox.style.display='none'; }
@@ -187,24 +243,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Manejar cancelación
     document.getElementById('cancelBtn').addEventListener('click', async function() {
-        if (currentJobId) {
-            try {
-                const response = await fetch(`${API_BASE}/cancel/${currentJobId}`, {
-                    method: 'POST'
-                });
-                
-                if (response.ok) {
-                    showStatus('info', '❌ Descarga cancelada por el usuario');
-                    clearInterval(statusInterval);
-                    statusInterval = null;
-                    currentJobId = null;
-                    resetButton();
-                } else {
-                    showStatus('error', 'No se pudo cancelar la descarga');
-                }
-            } catch (error) {
-                showStatus('error', `Error al cancelar: ${error.message}`);
+        if (!currentJobId) return;
+        try {
+            const response = await fetch(`${API_BASE}/cancel/${currentJobId}`, { method: 'POST' });
+            if (response.ok) {
+                showStatus('info', '❌ Descarga cancelada por el usuario');
+                clearPolling();
+                currentJobId = null;
+                resetButton();
+            } else {
+                showStatus('error', 'No se pudo cancelar la descarga');
             }
+        } catch (error) {
+            showStatus('error', `Error al cancelar: ${error.message}`);
         }
     });
 });
@@ -228,27 +279,6 @@ document.addEventListener('change', function(e){
         }
     }
 });
-
-// Verificar estado de descarga
-async function checkStatus() {
-    if (!currentJobId) return;
-    
-    try {
-        const response = await fetch(`${API_BASE}/status/${currentJobId}`);
-        const status = await response.json();
-        
-        updateStatusDisplay(status);
-        
-        if (status.status === 'completado' || status.status === 'error' || status.status === 'cancelado') {
-            clearInterval(statusInterval);
-            statusInterval = null;
-            resetButton();
-        }
-        
-    } catch (error) {
-        console.error('Error checking status:', error);
-    }
-}
 
 // Actualizar visualización del estado
 function updateStatusDisplay(status) {
@@ -332,6 +362,11 @@ function updateStatusDisplay(status) {
         if (status.error_type) lines.push(`🚧 Error previo: ${status.error_type}`);
         if (status.info) lines.push(`ℹ️ ${escapeHtml(status.info)}`);
         if (status.user_agent) lines.push(`🧾 UA: ${escapeHtml(status.user_agent.substring(0,120))}...`);
+        // Añadir info de polling
+        if (status.status_polls !== undefined) {
+            const currentDelay = POLL_STEPS[Math.min(pollStepIndex, POLL_STEPS.length-1)]/1000;
+            lines.push(`📡 Polls: <strong>${status.status_polls}</strong> (intervalo actual: ${currentDelay}s)`);
+        }
         if (lines.length) {
             box.style.display = 'block';
             box.innerHTML = lines.map(l=>`<div class="line">${l}</div>`).join('');
@@ -496,9 +531,7 @@ function resetButton() {
 
 // Cleanup al cerrar la página
 window.addEventListener('beforeunload', function() {
-    if (statusInterval) {
-        clearInterval(statusInterval);
-    }
+    clearPolling();
 });
 
 // Mostrar mensaje temporal
