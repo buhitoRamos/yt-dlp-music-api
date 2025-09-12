@@ -349,15 +349,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['head_adjusted_client'] = True
         DOWNLOADS_STATUS[job_id]['chosen_initial_client'] = base_player_client
         
-        # Detectar si estamos en un servidor remoto (Render, Heroku, etc.)
-        is_remote_server_detected = any([
-            os.environ.get('RENDER'),
-            os.environ.get('HEROKU'),
-            os.environ.get('RAILWAY_PROJECT_ID'),
-            os.environ.get('VERCEL'),
-            'render.com' in os.environ.get('HOSTNAME', ''),
-            'heroku.com' in os.environ.get('HOSTNAME', '')
-        ])
+        # Detectar si estamos en un servidor remoto (Render, Heroku, etc.) - forzado a remoto según requerimiento
+        is_remote_server_detected = True  # Forzado: siempre remoto
         # Aplicar overrides por request
         if force_local and not force_remote:
             is_remote_server = False
@@ -370,12 +363,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         DOWNLOADS_STATUS[job_id]['is_remote_detected'] = is_remote_server_detected
 
         # Overrides manuales para emular entorno (solución rápida en hosting)
-        if os.environ.get('FORCE_LOCAL_MODE') == '1' or os.environ.get('FORCE_LOCAL_STRATEGIES') == '1':
-            DOWNLOADS_STATUS[job_id]['force_mode'] = 'local_emulation'
-            is_remote_server = False
-        elif os.environ.get('FORCE_REMOTE_MODE') == '1':
-            DOWNLOADS_STATUS[job_id]['force_mode'] = 'remote_forced'
-            is_remote_server = True
+        # Fuerza final a remoto
+        is_remote_server = True
+        DOWNLOADS_STATUS[job_id]['force_mode'] = 'remote_forced'
         
         # Log del entorno detectado
         DOWNLOADS_STATUS[job_id]['environment'] = 'remote_server' if is_remote_server else 'local_dev'
@@ -386,11 +376,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         if is_remote_server:
             anti_429_options = [
                 '--no-check-certificate', '--user-agent', random_ua, '--referer', 'https://www.youtube.com/',
-                '--sleep-interval', '3', '--max-sleep-interval', '12',
+                # Eliminamos sleeps iniciales para rapidez controlada
                 '--extractor-args', f'youtube:player_client={base_player_client}',
                 '--extractor-args', 'youtube:skip=dash,hls', '--no-warnings', '--ignore-errors',
                 '--socket-timeout', '90', '--fragment-retries', '25', '--retries', '25',
-                '--throttled-rate', jitter_k('50K', jitter_enabled), '--geo-bypass', '--geo-bypass-country', 'US'
+                '--geo-bypass', '--geo-bypass-country', 'US'
             ]
             if content_type == 'shorts':
                 anti_429_options += ['--add-header','Accept-Language: en-US,en;q=0.9','--add-header','DNT: 1']
@@ -550,14 +540,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Intentar descarga con estrategias adaptadas al entorno y tipo de error
         success = False
         attempt = 1
-        if fast_mode:
-            max_attempts = 2  # rápido: intento principal + 1 reintento
-        else:
-            enable_final_aggressive = os.environ.get('AGGRESSIVE_FINAL_ATTEMPT', '1') == '1'
-            extra_clients = 2  # android + ios
-            base_remote = 6 if is_remote_server else 4
-            max_attempts = base_remote + (1 if enable_final_aggressive else 0) + (extra_clients if enable_final_aggressive else 0)
-            max_attempts = min(max_attempts, 9)
+        # Siempre exactamente 2 intentos como solicitaste
+        max_attempts = 2
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         
         # Preparar proxies si definidos
@@ -614,8 +598,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                         '--no-check-certificate','--user-agent', new_ua,'--referer','https://www.youtube.com/',
                         '--no-warnings','--ignore-errors','--socket-timeout','120','--fragment-retries','30','--retries','30','--geo-bypass','--geo-bypass-country','US'
                     ]
-                    if not fast_mode:
-                        retry_options.extend(['--sleep-interval', str(min_sleep), '--max-sleep-interval', str(max_sleep)])
+                    # Sin sleeps adicionales ni throttling en segundo intento
 
                     # Estrategias específicas por intento para servidores (diferenciando Shorts)
                     if is_shorts:
@@ -841,14 +824,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd_retry = [x for x in cmd_retry if x]
                 cmd_retry.append(url)
                 
-                if not fast_mode:
-                    delay = random.randint(3 + attempt, 8 + (attempt * 2))
-                    if DOWNLOADS_STATUS[job_id].get('error_type') == 'bot_verification' and not cookies_added and attempt >= 3:
-                        delay += 5
-                    DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
-                    time.sleep(delay)
-                else:
-                    DOWNLOADS_STATUS[job_id]['status'] = f'reintentando rápido {attempt}'
+                DOWNLOADS_STATUS[job_id]['status'] = f'reintentando {attempt}'
                 
                 cmd = cmd_retry
                 DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
