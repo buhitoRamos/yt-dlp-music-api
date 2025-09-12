@@ -7,6 +7,32 @@ let statusInterval = null;
 let localDirectoryHandle = null; // File System Access API directory handle
 let lastStatusCache = null;
 
+// Helper para pedir permisos explícitos si el navegador exige 'user activation'
+async function ensureDirectoryWritePermission() {
+    if (!localDirectoryHandle) return false;
+    try {
+        // Algunos navegadores requieren consultar primero
+        const opts = {mode:'readwrite'};
+        if (localDirectoryHandle.queryPermission) {
+            let p = await localDirectoryHandle.queryPermission(opts);
+            if (p === 'granted') return true;
+            if (p === 'prompt' && localDirectoryHandle.requestPermission) {
+                p = await localDirectoryHandle.requestPermission(opts);
+                return p === 'granted';
+            }
+            if (p === 'denied' && localDirectoryHandle.requestPermission) {
+                p = await localDirectoryHandle.requestPermission(opts);
+                return p === 'granted';
+            }
+        }
+        // Si no existen los métodos asumimos que ya hay permiso tras picker
+        return true;
+    } catch(e) {
+        console.warn('No se pudo confirmar permiso', e);
+        return false;
+    }
+}
+
 // (Simplificado) Eliminadas funciones antiguas de selección manual y manipulación de rutas locales.
 
 // Inicializar eventos cuando se carga la página
@@ -332,6 +358,11 @@ async function autoSaveAndCleanup(status) {
             return;
         }
         let saved = 0; let failed = 0;
+        const havePerm = await ensureDirectoryWritePermission();
+        if (!havePerm) {
+            showTemporaryMessage('⚠️ Permiso escritura denegado');
+            return;
+        }
         for (let i=0;i<urls.length;i++) {
             const baseServerPath = (status.files && status.files[i]) || `file_${i}`;
             const baseName = baseServerPath.split('/').pop();
@@ -346,6 +377,10 @@ async function autoSaveAndCleanup(status) {
                 await writable.close();
                 saved++;
             } catch(err) {
+                if (err && String(err).includes('User activation is required')) {
+                    // Crear un botón manual para reintentar con interacción
+                    injectManualSaveButton(status, i, baseName, urls[i]);
+                }
                 console.error('Fallo guardando', baseName, err);
                 failed++;
             }
@@ -357,6 +392,43 @@ async function autoSaveAndCleanup(status) {
     } catch(e) {
         console.warn('Auto save failed', e);
     }
+}
+
+function injectManualSaveButton(status, index, baseName, baseUrl) {
+    const list = document.getElementById('filesList');
+    if (!list) return;
+    const wrapper = document.createElement('div');
+    wrapper.style.display='flex';
+    wrapper.style.alignItems='center';
+    wrapper.style.gap='6px';
+    const label = document.createElement('span');
+    label.textContent = baseName + ' (permiso requerido)';
+    label.style.fontSize='0.7rem';
+    const btn = document.createElement('button');
+    btn.textContent = 'Guardar ahora';
+    btn.className = 'mini-btn';
+    btn.style.background='#ff9800';
+    btn.addEventListener('click', async ()=>{
+        try {
+            const granted = await ensureDirectoryWritePermission();
+            if (!granted) { showTemporaryMessage('Permiso aún denegado'); return; }
+            const resp = await fetch(baseUrl + '?delete=1');
+            if (!resp.ok) throw new Error('Resp '+resp.status);
+            const blob = await resp.blob();
+            const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            wrapper.remove();
+            showTemporaryMessage('✅ Guardado manual: '+baseName);
+        } catch(err) {
+            showTemporaryMessage('Error manual');
+            console.error(err);
+        }
+    });
+    wrapper.appendChild(label);
+    wrapper.appendChild(btn);
+    list.appendChild(wrapper);
 }
 
 // Mostrar estado
