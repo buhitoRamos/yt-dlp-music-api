@@ -387,65 +387,17 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Definir bandera para saltar intento de extracción de cookies de navegador
         # Preparar opciones base dependiendo del entorno
         skip_browser_cookie_scan = False
-        if is_remote_server:
-            anti_429_options = [
-                '--no-check-certificate', '--user-agent', random_ua, '--referer', 'https://www.youtube.com/',
-                # Eliminamos sleeps iniciales para rapidez controlada
-                '--extractor-args', f'youtube:player_client={base_player_client}',
-                '--extractor-args', 'youtube:skip=dash,hls', '--no-warnings', '--ignore-errors',
-                '--socket-timeout', '90', '--fragment-retries', '25', '--retries', '25',
-                '--geo-bypass', '--geo-bypass-country', 'US'
-            ]
-            if content_type == 'shorts':
-                anti_429_options += ['--add-header','Accept-Language: en-US,en;q=0.9','--add-header','DNT: 1']
-            DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'server_aggressive'
-        else:
-            anti_429_options = [
-                '--no-check-certificate','--user-agent', random_ua,'--referer','https://www.youtube.com/',
-                '--sleep-interval','2','--max-sleep-interval','5','--extractor-args','youtube:player_client=web',
-                '--no-warnings','--ignore-errors','--socket-timeout','60','--fragment-retries','15','--retries','15'
-            ]
-            # Detectar disponibilidad de perfiles locales reales (solo tiene sentido en host con navegadores instalados)
-            def browser_profile_exists():
-                home = os.path.expanduser('~')
-                chrome_path = os.path.join(home, '.config', 'google-chrome')
-                firefox_path = os.path.join(home, '.mozilla', 'firefox')
-                return (os.path.isdir(chrome_path) or os.path.isdir(firefox_path))
-
-            auto_skip = False
-            if force_local and is_remote_server_detected and not browser_profile_exists():
-                # Estás forzando local en un hosting sin bases de datos de cookies -> saltar
-                auto_skip = True
-                DOWNLOADS_STATUS[job_id]['auto_cookies_unavailable'] = True
-            skip_browser_cookie_scan = (
-                os.environ.get('DISABLE_BROWSER_COOKIES') == '1' or
-                os.environ.get('FORCE_LOCAL_NO_BROWSER') == '1' or
-                (force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1') or
-                auto_skip
-            )
-            browser_cookies_added = False
-            if not skip_browser_cookie_scan:
-                for browser in ['chrome','firefox','safari','edge']:
-                    try:
-                        test_cmd = ['python3','-m','yt_dlp','--cookies-from-browser',browser,'--simulate','https://www.youtube.com/watch?v=dQw4w9WgXcQ']
-                        test_process = subprocess.run(test_cmd, capture_output=True, timeout=8)
-                        if test_process.returncode == 0:
-                            anti_429_options += ['--cookies-from-browser', browser]
-                            DOWNLOADS_STATUS[job_id]['auto_cookies'] = f'Usando cookies de {browser}'
-                            browser_cookies_added = True
-                            break
-                    except Exception:
-                        continue
-            if browser_cookies_added:
-                DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_with_browser_cookies'
-            else:
-                if skip_browser_cookie_scan:
-                    DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic_no_browser'
-                    DOWNLOADS_STATUS[job_id]['auto_cookies'] = 'omitido_scan_navegador'
-                    if auto_skip:
-                        DOWNLOADS_STATUS[job_id]['auto_cookies_reason'] = 'no_browser_profiles_in_remote'
-                else:
-                    DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
+        # Forzar siempre estrategia server_aggressive única
+        anti_429_options = [
+            '--no-check-certificate', '--user-agent', random_ua, '--referer', 'https://www.youtube.com/',
+            '--extractor-args', f'youtube:player_client={base_player_client}',
+            '--extractor-args', 'youtube:skip=dash,hls', '--no-warnings', '--ignore-errors',
+            '--socket-timeout', '90', '--fragment-retries', '25', '--retries', '25',
+            '--geo-bypass', '--geo-bypass-country', 'US'
+        ]
+        if content_type == 'shorts':
+            anti_429_options += ['--add-header','Accept-Language: en-US,en;q=0.9','--add-header','DNT: 1']
+        DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'server_aggressive'
 
         cmd.extend(anti_429_options)
         DOWNLOADS_STATUS[job_id]['user_agent'] = random_ua
@@ -1093,6 +1045,9 @@ def get_status(job_id):
         for idx, _f in enumerate(files):
             base_urls.append(f"/file/{job_id}/{idx}")
         status['download_urls'] = base_urls
+        status['cleanup_available'] = True
+    else:
+        status['cleanup_available'] = False
     
     return jsonify(status)
 
@@ -1107,9 +1062,53 @@ def serve_downloaded_file(job_id, index):
     if not os.path.exists(path):
         return jsonify({'error':'Archivo no existe en servidor'}), 404
     try:
-        return send_file(path, as_attachment=True)
+        delete_after = request.args.get('delete') == '1'
+        resp = send_file(path, as_attachment=True)
+        if delete_after:
+            try:
+                os.remove(path)
+                # Actualizar lista en estado
+                remaining = [p for i,p in enumerate(DOWNLOADS_STATUS[job_id].get('files', [])) if i != index]
+                DOWNLOADS_STATUS[job_id]['files'] = remaining
+            except Exception as de:
+                DOWNLOADS_STATUS[job_id]['cleanup_error'] = str(de)
+        return resp
     except Exception as e:
         return jsonify({'error':'No se pudo enviar el archivo','detalle':str(e)}), 500
+
+@app.route('/cleanup/<job_id>', methods=['POST'])
+def cleanup_job(job_id):
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    files = DOWNLOADS_STATUS[job_id].get('files') or []
+    deleted = []
+    errors = []
+    for p in files:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                deleted.append(os.path.basename(p))
+        except Exception as e:
+            errors.append({'file':p,'error':str(e)})
+    DOWNLOADS_STATUS[job_id]['files'] = []
+    return jsonify({'status':'ok','deleted':deleted,'errors':errors})
+
+@app.route('/delete-file/<job_id>/<int:index>', methods=['POST'])
+def delete_single_file(job_id, index):
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    files = DOWNLOADS_STATUS[job_id].get('files') or []
+    if index < 0 or index >= len(files):
+        return jsonify({'error':'Índice inválido'}), 400
+    path = files[index]
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        remaining = [p for i,p in enumerate(files) if i != index]
+        DOWNLOADS_STATUS[job_id]['files'] = remaining
+        return jsonify({'status':'ok','deleted':os.path.basename(path),'remaining':len(remaining)})
+    except Exception as e:
+        return jsonify({'error':'No se pudo borrar','detalle':str(e)}), 500
 
 @app.route('/upload-cookies', methods=['POST'])
 def upload_cookies():

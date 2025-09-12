@@ -4,6 +4,8 @@
 const API_BASE = window.location.origin;
 let currentJobId = null;
 let statusInterval = null;
+let localDirectoryHandle = null; // File System Access API directory handle
+let lastStatusCache = null;
 
 // Función para seleccionar carpeta
 async function selectFolder() {
@@ -125,6 +127,80 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch(err) {
                 cookiesStatus.textContent = '❌ Conexión'; cookiesStatus.className='cookies-status err';
+            }
+        });
+    }
+
+    // Botón para elegir carpeta local real (File System Access API)
+    const pickBtn = document.getElementById('pickLocalDirBtn');
+    if (pickBtn) {
+        pickBtn.addEventListener('click', async ()=>{
+            if (!('showDirectoryPicker' in window)) {
+                showTemporaryMessage('⚠️ Tu navegador no soporta File System Access API');
+                return;
+            }
+            try {
+                localDirectoryHandle = await window.showDirectoryPicker();
+                showTemporaryMessage('📁 Carpeta local autorizada');
+                pickBtn.textContent = '📁 Carpeta autorizada';
+                pickBtn.disabled = true;
+            } catch(e) {
+                showTemporaryMessage('❌ Cancelado');
+            }
+        });
+    }
+
+    // Guardar localmente
+    const saveLocallyBtn = document.getElementById('saveLocallyBtn');
+    if (saveLocallyBtn) {
+        saveLocallyBtn.addEventListener('click', async ()=>{
+            if (!lastStatusCache || !lastStatusCache.download_urls) {
+                showTemporaryMessage('No hay archivos para guardar');
+                return;
+            }
+            if (!localDirectoryHandle) {
+                showTemporaryMessage('Elige primero una carpeta local');
+                return;
+            }
+            const statusLabel = document.getElementById('localSaveStatus');
+            statusLabel.textContent = 'Guardando...';
+            let ok = 0; let fail = 0;
+            for (let i=0;i<lastStatusCache.download_urls.length;i++) {
+                const url = lastStatusCache.download_urls[i];
+                try {
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error('HTTP '+resp.status);
+                    const blob = await resp.blob();
+                    const serverPath = (lastStatusCache.files && lastStatusCache.files[i]) || `file_${i}`;
+                    const baseName = serverPath.split('/').pop();
+                    const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                    ok++;
+                } catch(err) {
+                    console.error('Save error', err);
+                    fail++;
+                }
+            }
+            statusLabel.textContent = `Guardados: ${ok}, Fallidos: ${fail}`;
+        });
+    }
+
+    // Limpiar remoto
+    const cleanupBtn = document.getElementById('cleanupRemoteBtn');
+    if (cleanupBtn) {
+        cleanupBtn.addEventListener('click', async ()=>{
+            if (!currentJobId) return;
+            try {
+                const r = await fetch(`${API_BASE}/cleanup/${currentJobId}`, {method:'POST'});
+                const d = await r.json();
+                showTemporaryMessage('🧹 Limpieza remota realizada');
+                document.getElementById('localSaveStatus').textContent = 'Servidor limpio';
+                // Forzar refresco de estado para ocultar botones
+                setTimeout(checkStatus, 800);
+            } catch(e) {
+                showTemporaryMessage('Error limpiando remoto');
             }
         });
     }
@@ -310,6 +386,7 @@ async function checkStatus() {
 
 // Actualizar visualización del estado
 function updateStatusDisplay(status) {
+    lastStatusCache = status; // cache
     switch (status.status) {
         case 'iniciando':
             showStatus('loading', 'Iniciando descarga...');
@@ -326,6 +403,15 @@ function updateStatusDisplay(status) {
             setProgress(100);
             if (status.files && status.files.length > 0) {
                 showFiles(status.files);
+                // Mostrar acciones locales si hay soporte API y archivos
+                const act = document.getElementById('localSaveActions');
+                if (act) {
+                    act.style.display = 'block';
+                }
+            }
+            // Si el navegador soporta FS API y hay URLs, intentar auto-guardar si ya se autorizó
+            if (status.download_urls && localDirectoryHandle) {
+                autoSaveAndCleanup(status).catch(()=>{});
             }
             if (status.stdout) {
                 showLog(status.stdout);
@@ -391,6 +477,30 @@ function updateStatusDisplay(status) {
             box.innerHTML = lines.map(l=>`<div class="line">${l}</div>`).join('');
         }
     } catch(e){ /* noop */ }
+}
+
+async function autoSaveAndCleanup(status) {
+    try {
+        const urls = status.download_urls || [];
+        if (!urls.length) return;
+        let saved = 0;
+        for (let i=0;i<urls.length;i++) {
+            const u = urls[i];
+            const resp = await fetch(u);
+            if (!resp.ok) continue;
+            const blob = await resp.blob();
+            const serverPath = (status.files && status.files[i]) || `file_${i}`;
+            const baseName = serverPath.split('/').pop();
+            const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            saved++;
+        }
+        showTemporaryMessage(`💾 Auto-guardados ${saved}/${urls.length}`);
+    } catch(e) {
+        console.warn('Auto save failed', e);
+    }
 }
 
 // Mostrar estado
