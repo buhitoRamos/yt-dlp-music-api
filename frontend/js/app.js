@@ -107,7 +107,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     label.style.color = '#0a7523';
                 }
                 await autoSaveAndCleanup(lastStatusCache);
-                pickBtn.textContent = '✅ Copiado y borrado';
+                pickBtn.textContent = '✅ Finalizado';
             } catch(e) {
                 pickBtn.disabled = false;
                 pickBtn.textContent = '💾 Copiar a carpeta...';
