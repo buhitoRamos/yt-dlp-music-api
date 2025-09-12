@@ -102,6 +102,8 @@ Reducción de salida / rapidez:
 | `PLAYLIST_LIMIT` | N (int) | Aplica `--playlist-end N` para limitar items |
 | `SINGLE_ITEM` | 0/1 | Fuerza `--no-playlist` (solo 1 elemento incluso en playlist) |
 | `DOWNLOAD_ARCHIVE` | 0/1 | Usa `.downloaded.txt` para saltar ya procesados |
+| `AUTO_WIPE_DIR` | 0/1 | Limpia automáticamente archivos generados tras servirlos (cuando ya no quedan) |
+| `REMOVE_EMPTY_DIR` | 0/1 | Si la carpeta queda vacía tras wipe la elimina |
 
 Prefetch (metadata rápida) - para acelerar inicio y evitar timeouts en playlists grandes:
 | Variable | Valores | Descripción |

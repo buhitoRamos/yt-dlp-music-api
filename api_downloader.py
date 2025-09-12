@@ -277,6 +277,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             initial_files_snapshot = set(os.listdir(output_dir))
         except Exception:
             initial_files_snapshot = set()
+        # Guardar snapshot para futura limpieza selectiva
+        try:
+            DOWNLOADS_STATUS[job_id]['initial_snapshot'] = list(initial_files_snapshot)
+        except Exception:
+            DOWNLOADS_STATUS[job_id]['initial_snapshot'] = []
 
         # Flags de características avanzadas (pack completo)
         # Prefetch control:
@@ -861,16 +866,33 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd_retry.extend(retry_options)
                 # Ajustes especiales si venimos de un error de tab parse (playlist Music)
                 if DOWNLOADS_STATUS[job_id].get('tab_parse_recovery'):
-                    # Evitar duplicar banderas; añadir combinación de clientes alternativos y flat-playlist
-                    recovery_flags = [
-                        '--flat-playlist',
-                        '--extractor-args', 'youtube:player_client=web',
-                        '--extractor-args', 'youtube:player_client=android'
-                    ]
-                    for rf in recovery_flags:
-                        if rf not in cmd_retry:
-                            cmd_retry.append(rf)
+                    # Inyectar recuperación con un solo --extractor-args agregando múltiples clientes en cadena.
+                    # Evitamos múltiples pares que en algunos entornos terminaban generando tokens sueltos
+                    # que yt-dlp interpretaba como URLs ("youtube:player_client=web").
+                    if '--flat-playlist' not in cmd_retry:
+                        cmd_retry.append('--flat-playlist')
+                    # Eliminar duplicados previos de --extractor-args player_client para limpiar
+                    cleaned = []
+                    skip_next = False
+                    for i,tok in enumerate(cmd_retry):
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if tok == '--extractor-args' and i+1 < len(cmd_retry):
+                            argval = cmd_retry[i+1]
+                            if argval.startswith('youtube:player_client='):
+                                # Saltar este par (lo reconstruiremos abajo)
+                                skip_next = True
+                                continue
+                        cleaned.append(tok)
+                    cmd_retry = cleaned
+                    # Añadir args combinados (lista separada por ; si yt-dlp lo admite, si no usar última prioridad)
+                    # yt-dlp actualmente acepta una sola asignación; estrategia: preferencia android luego web para Music
+                    # Para evitar error, solo uno: elegimos android si playlist music.
+                    combined_client = 'android' if 'music.youtube.com' in url else 'web'
+                    cmd_retry.extend(['--extractor-args', f'youtube:player_client={combined_client}'])
                     DOWNLOADS_STATUS[job_id]['recovery_injected'] = True
+                    DOWNLOADS_STATUS[job_id]['recovery_client'] = combined_client
                 # Asignar proxy rotativo
                 if proxies:
                     idx = (attempt - 1) % len(proxies) if rotate_proxies else 0
@@ -1232,6 +1254,41 @@ def serve_downloaded_file(job_id, index):
                 DOWNLOADS_STATUS[job_id]['files'] = remaining
             except Exception as de:
                 DOWNLOADS_STATUS[job_id]['cleanup_error'] = str(de)
+        # Auto wipe condicional: si no quedan archivos y variable activa, borrar carpeta
+        try:
+            if os.environ.get('AUTO_WIPE_DIR','0') == '1':
+                job = DOWNLOADS_STATUS.get(job_id, {})
+                out_dir = job.get('resolved_output_dir') or job.get('requested_output_dir')
+                if out_dir and os.path.isdir(out_dir):
+                    remaining_files = job.get('files') or []
+                    if not remaining_files:
+                        # Limpiar archivos nuevos que pudieran quedar (comparar con snapshot inicial)
+                        initial_snapshot = set(job.get('initial_snapshot') or [])
+                        current_listing = []
+                        try:
+                            current_listing = os.listdir(out_dir)
+                        except Exception:
+                            current_listing = []
+                        for fname in list(current_listing):
+                            if fname in initial_snapshot:
+                                continue  # respetar archivos previos
+                            fpath = os.path.join(out_dir, fname)
+                            try:
+                                if os.path.isfile(fpath):
+                                    os.remove(fpath)
+                            except Exception:
+                                pass
+                        # Intentar borrar directorio si está vacío y flag REMOVE_EMPTY_DIR=1
+                        if os.environ.get('REMOVE_EMPTY_DIR','0') == '1':
+                            try:
+                                if len(os.listdir(out_dir)) == 0:
+                                    os.rmdir(out_dir)
+                                    DOWNLOADS_STATUS[job_id]['dir_removed'] = True
+                            except Exception:
+                                pass
+                        DOWNLOADS_STATUS[job_id]['auto_wiped'] = True
+        except Exception as e_aw:
+            DOWNLOADS_STATUS[job_id]['auto_wipe_error'] = str(e_aw)
         return resp
     except Exception as e:
         return jsonify({'error':'No se pudo enviar el archivo','detalle':str(e)}), 500
@@ -1252,6 +1309,46 @@ def cleanup_job(job_id):
             errors.append({'file':p,'error':str(e)})
     DOWNLOADS_STATUS[job_id]['files'] = []
     return jsonify({'status':'ok','deleted':deleted,'errors':errors})
+
+@app.route('/wipe/<job_id>', methods=['POST'])
+def wipe_job_directory(job_id):
+    """Elimina todos los archivos nuevos generados por el job y opcionalmente el directorio si queda vacío.
+    Respeta snapshot inicial (no borra archivos previos). Controlado además por REMOVE_EMPTY_DIR."""
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    job = DOWNLOADS_STATUS[job_id]
+    out_dir = job.get('resolved_output_dir') or job.get('requested_output_dir')
+    if not out_dir or not os.path.isdir(out_dir):
+        return jsonify({'error':'Directorio inválido'}), 400
+    initial_snapshot = set(job.get('initial_snapshot') or [])
+    try:
+        current_listing = os.listdir(out_dir)
+    except Exception as e:
+        return jsonify({'error':'No se pudo listar directorio','detalle':str(e)}), 500
+    removed = []
+    errors = []
+    for fname in list(current_listing):
+        if fname in initial_snapshot:
+            continue
+        fpath = os.path.join(out_dir, fname)
+        try:
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+                removed.append(fname)
+        except Exception as e:
+            errors.append({'file':fname,'error':str(e)})
+    dir_removed = False
+    if os.environ.get('REMOVE_EMPTY_DIR','0') == '1':
+        try:
+            if len(os.listdir(out_dir)) == 0:
+                os.rmdir(out_dir)
+                dir_removed = True
+        except Exception:
+            pass
+    job['manual_wipe'] = True
+    if removed:
+        job['auto_wiped'] = True
+    return jsonify({'status':'ok','removed':removed,'dir_removed':dir_removed,'errors':errors})
 
 @app.route('/delete-file/<job_id>/<int:index>', methods=['POST'])
 def delete_single_file(job_id, index):
