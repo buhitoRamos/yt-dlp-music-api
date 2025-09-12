@@ -274,18 +274,41 @@ function updateStatusDisplay(status) {
         const box = document.getElementById('strategyInfo');
         if (!box) return;
         const lines = [];
+        // Campo principal de estado / attempts
+        if (status.attempt || status.max_attempts) {
+            const att = status.attempt || 0;
+            const maxA = status.max_attempts || '?';
+            lines.push(`🔁 Intento: <strong>${att}</strong>/<strong>${maxA}</strong>${status.attempts_used !== undefined ? ` (usados:${status.attempts_used})` : ''}`);
+        }
         if (status.environment) lines.push(`🌐 Entorno: ${status.environment}`);
-        if (status.is_remote_detected !== undefined) lines.push(`🔍 remoto_detectado: ${status.is_remote_detected}`);
+        if (status.is_remote_detected !== undefined) lines.push(`🔍 Remoto detectado: ${status.is_remote_detected}`);
         if (status.force_mode) lines.push(`⚙️ Modo forzado: ${status.force_mode}`);
-        if (status.anti_bot_level) lines.push(`🛡️ Anti-bot: ${status.anti_bot_level}`);
-        if (status.attempt) lines.push(`🔁 Intento: ${status.attempt}`);
-        if (status.error_type) lines.push(`🚧 Error previo: ${status.error_type}`);
+        if (status.anti_bot_level) lines.push(`🛡️ Nivel anti-bot: ${status.anti_bot_level}`);
+        if (status.chosen_initial_client) lines.push(`🎯 Cliente inicial: <code>${status.chosen_initial_client}</code>${status.cache_hit ? ' <span class="badge cache-hit">CACHE</span>' : ''}`);
+        if (status.prefetch_title) {
+            const dur = status.prefetch_duration ? ` (${status.prefetch_duration}s)` : '';
+            lines.push(`🕵️ Prefetch: <em>${escapeHtml(status.prefetch_title).substring(0,80)}</em>${dur}`);
+        } else if (status.prefetch === false) {
+            lines.push('🕵️ Prefetch: <span class="badge off">off</span>');
+        }
+        if (status.head_check !== undefined) {
+            let hcVal = '';
+            if (typeof status.head_check === 'object') {
+                try { hcVal = JSON.stringify(status.head_check); } catch(e){ hcVal = String(status.head_check); }
+            } else {
+                hcVal = String(status.head_check);
+            }
+            lines.push(`� HEAD check: ${hcVal}`);
+        }
+        if (status.requires_cookies) lines.push(`🍪 Requiere cookies: <span class="badge warn">SI</span>`);
+        else if (status.requires_cookies === false) lines.push(`🍪 Requiere cookies: <span class="badge ok">no</span>`);
         if (status.cookies) lines.push(`🍪 ${status.cookies}`);
-        if (status.info) lines.push(`ℹ️ ${status.info}`);
-        if (status.user_agent) lines.push(`UA: ${status.user_agent.substring(0,90)}...`);
+        if (status.error_type) lines.push(`🚧 Error previo: ${status.error_type}`);
+        if (status.info) lines.push(`ℹ️ ${escapeHtml(status.info)}`);
+        if (status.user_agent) lines.push(`🧾 UA: ${escapeHtml(status.user_agent.substring(0,120))}...`);
         if (lines.length) {
             box.style.display = 'block';
-            box.innerHTML = lines.map(l=>`<div>${l}</div>`).join('');
+            box.innerHTML = lines.map(l=>`<div class="line">${l}</div>`).join('');
         }
     } catch(e){ /* noop */ }
 }
@@ -389,3 +412,12 @@ function showTemporaryMessage(message, duration = 3000) {
         messageEl.style.transform = 'translateX(100%)';
     }, duration);
 }
+
+// Utilidades simples
+function escapeHtml(str){
+    if (!str) return '';
+    return str.replace(/[&<>"]/g, function(c){
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c] || c;
+    });
+}
+

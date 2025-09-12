@@ -238,6 +238,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
         
+        # Snapshot inicial de archivos existentes para diferenciar nuevos al terminar
+        try:
+            initial_files_snapshot = set(os.listdir(output_dir))
+        except Exception:
+            initial_files_snapshot = set()
+
         # Flags de características avanzadas (pack completo)
         enable_prefetch = os.environ.get('ENABLE_PREFETCH', '1') == '1'
         enable_cache = os.environ.get('ENABLE_CLIENT_CACHE', '1') == '1'
@@ -825,11 +831,27 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         
         # Si llegamos aquí, la descarga fue exitosa
         if success:
-            # Buscar archivos descargados
+            # Determinar archivos nuevos comparando con snapshot inicial
             downloaded_files = []
-            for file in os.listdir(output_dir):
-                if file.endswith(('.mp3', '.mp4', '.webm', '.m4a')):
-                    downloaded_files.append(os.path.join(output_dir, file))
+            try:
+                final_listing = set(os.listdir(output_dir))
+                new_files = [f for f in final_listing - initial_files_snapshot if f.lower().endswith(('.mp3','.mp4','.webm','.m4a','.info.json'))]
+                # Priorizar: audio/video principal primero, luego info.json
+                def sort_key(name):
+                    if name.endswith('.info.json'): return (2, name)
+                    if name.endswith(('.mp3','.m4a')): return (0, name)
+                    return (1, name)
+                new_files.sort(key=sort_key)
+                downloaded_files = [os.path.join(output_dir, f) for f in new_files]
+            except Exception as e:
+                DOWNLOADS_STATUS[job_id]['file_diff_error'] = str(e)
+                # Fallback a listado completo
+                try:
+                    for file in os.listdir(output_dir):
+                        if file.endswith(('.mp3', '.mp4', '.webm', '.m4a')):
+                            downloaded_files.append(os.path.join(output_dir, file))
+                except Exception:
+                    pass
 
             # Guardar cliente exitoso en caché si posible
             if enable_cache:
