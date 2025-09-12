@@ -17,6 +17,9 @@ DOWNLOADS_STATUS = {}
 # Caché sencilla de último cliente exitoso por tipo de contenido
 CLIENT_CACHE = {}
 
+# Ruta de cookies cargadas en runtime (upload) opcional
+UPLOADED_COOKIES_PATH = None
+
 # Inicializar aplicación Flask (fue removido accidentalmente en refactor)
 app = Flask(__name__)
 CORS(app)
@@ -52,30 +55,30 @@ def prefetch_metadata(url, timeout=18):
     except Exception as e:
         return None, str(e)[:500]
 
-    def multi_prefetch(url, clients, timeout=14):
-        """Intenta prefetch usando distintos player_client para aumentar chance de metadata.
-        Devuelve (data, client_usado, error_acumulado)"""
-        errors = []
-        for c in clients:
-            cmd = [
-                'python3','-m','yt_dlp',
-                '--dump-json','--no-check-certificate','--ignore-errors','--skip-download',
-                '--extractor-args', f'youtube:player_client={c}', url
-            ]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-                if proc.returncode == 0 and proc.stdout.strip():
-                    line = proc.stdout.strip().splitlines()[0]
-                    try:
-                        data = json.loads(line)
-                        return data, c, None
-                    except Exception as je:
-                        errors.append(f'{c}:json_error:{je}')
-                else:
-                    errors.append(f'{c}:{proc.stderr.strip()[:120]}')
-            except Exception as e:
-                errors.append(f'{c}:{str(e)[:120]}')
-        return None, None, ' | '.join(errors)[:500]
+def multi_prefetch(url, clients, timeout=14):
+    """Intenta prefetch usando distintos player_client para aumentar chance de metadata.
+    Devuelve (data, client_usado, error_acumulado)"""
+    errors = []
+    for c in clients:
+        cmd = [
+            'python3','-m','yt_dlp',
+            '--dump-json','--no-check-certificate','--ignore-errors','--skip-download',
+            '--extractor-args', f'youtube:player_client={c}', url
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if proc.returncode == 0 and proc.stdout.strip():
+                line = proc.stdout.strip().splitlines()[0]
+                try:
+                    data = json.loads(line)
+                    return data, c, None
+                except Exception as je:
+                    errors.append(f'{c}:json_error:{je}')
+            else:
+                errors.append(f'{c}:{proc.stderr.strip()[:120]}')
+        except Exception as e:
+            errors.append(f'{c}:{str(e)[:120]}')
+    return None, None, ' | '.join(errors)[:500]
 def head_validate_small(url, timeout=8):
     """Validación rápida haciendo petición parcial (Range) para detectar bloqueos tempranos.
     Devuelve True si responde 2xx/206, False en error."""
@@ -286,6 +289,26 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 if err:
                     prefetch_error = err
                     DOWNLOADS_STATUS[job_id]['prefetch_error'] = err
+                # Multi-prefetch fallback si falla el primero
+                mp_clients = ['web','mweb','tv_embedded','web_embedded']
+                mp_data, mp_client, mp_err = multi_prefetch(url, mp_clients)
+                if mp_data:
+                    prefetch_data = mp_data
+                    DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok_multi'
+                    DOWNLOADS_STATUS[job_id]['prefetch_client'] = mp_client
+                    DOWNLOADS_STATUS[job_id]['prefetch_title'] = mp_data.get('title','')[:120]
+                    DOWNLOADS_STATUS[job_id]['prefetch_duration'] = mp_data.get('duration')
+                    try:
+                        fmts = mp_data.get('formats') or []
+                        audio_only = [f for f in fmts if f.get('vcodec') in (None,'none') and f.get('acodec') not in (None,'none')]
+                        audio_only.sort(key=lambda f: f.get('abr',0), reverse=True)
+                        if audio_only:
+                            first_audio_url = audio_only[0].get('url')
+                    except Exception:
+                        pass
+                else:
+                    if mp_err:
+                        DOWNLOADS_STATUS[job_id]['prefetch_multi_error'] = mp_err
         # Validación HEAD parcial si habilitado y tenemos URL de audio
         if head_validate and first_audio_url:
             head_ok = head_validate_small(first_audio_url)
@@ -396,28 +419,37 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         cmd.extend(anti_429_options)
         DOWNLOADS_STATUS[job_id]['user_agent'] = random_ua
 
-        # Cookies prioridad alta
+        # Cookies prioridad alta (runtime upload > env var > file)
         cookies_added = False
         temp_cookies_path = None
-        if os.environ.get('YOUTUBE_COOKIES'):
+        global UPLOADED_COOKIES_PATH
+        if UPLOADED_COOKIES_PATH and os.path.exists(UPLOADED_COOKIES_PATH):
+            cmd += ['--cookies', UPLOADED_COOKIES_PATH]
+            DOWNLOADS_STATUS[job_id]['cookies'] = 'cookies_upload_runtime'
+            DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'uploaded_initial'
+            cookies_added = True
+        elif os.environ.get('YOUTUBE_COOKIES'):
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                 f.write(os.environ.get('YOUTUBE_COOKIES'))
                 temp_cookies_path = f.name
             cmd += ['--cookies', temp_cookies_path]
-            DOWNLOADS_STATUS[job_id]['cookies'] = 'Usando cookies desde variable de entorno'
+            DOWNLOADS_STATUS[job_id]['cookies'] = 'env_variable'
+            DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'env_initial'
             cookies_added = True
         elif cookies_file:
             if os.path.exists(cookies_file):
                 cmd += ['--cookies', cookies_file]
-                DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {cookies_file}'
+                DOWNLOADS_STATUS[job_id]['cookies'] = f'file:{cookies_file}'
+                DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'file_initial'
                 cookies_added = True
             else:
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 alt = os.path.join(script_dir, cookies_file)
                 if os.path.exists(alt):
                     cmd += ['--cookies', alt]
-                    DOWNLOADS_STATUS[job_id]['cookies'] = f'Usando cookies: {alt}'
+                    DOWNLOADS_STATUS[job_id]['cookies'] = f'file:{alt}'
+                    DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'file_initial_alt'
                     cookies_added = True
         elif not cookies_added and is_remote_server:
             DOWNLOADS_STATUS[job_id]['info'] = 'Servidor remoto: usando estrategias anti-bot sin cookies'
@@ -436,11 +468,15 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     temp_cookies_path = fake_file.name
                     cmd += ['--cookies', temp_cookies_path]
                     DOWNLOADS_STATUS[job_id]['cookies'] = 'cookie_sintetica'
+                    DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'synthetic_initial'
                 except Exception as e:
                     DOWNLOADS_STATUS[job_id]['fake_cookie_error'] = str(e)
         else:
             if not cookies_added:
                 DOWNLOADS_STATUS[job_id]['info'] = 'Usando cookies manuales + estrategias anti-bot'
+        DOWNLOADS_STATUS[job_id].setdefault('cookie_stage', 'none')
+        pending_cookie_escalation = False
+        first_bot_trigger_attempt = None
 
         # Formato/naming
         if format_type == 'mp3':
@@ -490,6 +526,35 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['proxies_enabled'] = len(proxies)
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
+            # Si hay escalada pendiente y aún no hemos añadido cookies reales
+            if attempt > 1 and pending_cookie_escalation and not cookies_added:
+                # Escalar: usar uploaded/env/file en este punto si disponibles
+                escalated = False
+                if UPLOADED_COOKIES_PATH and os.path.exists(UPLOADED_COOKIES_PATH):
+                    cmd.extend(['--cookies', UPLOADED_COOKIES_PATH])
+                    DOWNLOADS_STATUS[job_id]['cookies'] = 'cookies_upload_runtime'
+                    DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'uploaded_escalated'
+                    escalated = True
+                elif os.environ.get('YOUTUBE_COOKIES'):
+                    try:
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                            f.write(os.environ.get('YOUTUBE_COOKIES'))
+                            temp_cookies_path = f.name
+                        cmd.extend(['--cookies', temp_cookies_path])
+                        DOWNLOADS_STATUS[job_id]['cookies'] = 'env_variable'
+                        DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'env_escalated'
+                        escalated = True
+                    except Exception as e:
+                        DOWNLOADS_STATUS[job_id]['cookies_error'] = f'env_escalation:{e}'
+                elif cookies_file and os.path.exists(cookies_file):
+                    cmd.extend(['--cookies', cookies_file])
+                    DOWNLOADS_STATUS[job_id]['cookies'] = f'file:{cookies_file}'
+                    DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'file_escalated'
+                    escalated = True
+                if escalated:
+                    cookies_added = True
+                    pending_cookie_escalation = False
             
             if attempt > 1:
                 # Crear comando modificado para reintentos específicos anti-bot
@@ -802,6 +867,10 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     DOWNLOADS_STATUS[job_id]['error_type'] = error_type
                     if error_is_bot_check and not cookies_added:
                         DOWNLOADS_STATUS[job_id]['requires_cookies'] = True
+                        pending_cookie_escalation = True  # Solicitar escalada temprana
+                        if first_bot_trigger_attempt is None:
+                            first_bot_trigger_attempt = attempt
+                            DOWNLOADS_STATUS[job_id]['bot_trigger_attempt'] = attempt
                     DOWNLOADS_STATUS[job_id]['status'] = f'reintentando por {error_type} ({attempt + 1}/{max_attempts})'
                     
                     # Delay más largo para errores de bot
@@ -945,6 +1014,29 @@ def get_status(job_id):
         del status['process']
     
     return jsonify(status)
+
+@app.route('/upload-cookies', methods=['POST'])
+def upload_cookies():
+    """Permite subir el contenido de un archivo de cookies (formato Netscape) en runtime.
+    Body JSON: {"cookies_text":"..."}
+    Prioridad sobre variable de entorno."""
+    global UPLOADED_COOKIES_PATH
+    try:
+        data = request.get_json(force=True)
+        cookies_text = data.get('cookies_text','').strip()
+        if not cookies_text:
+            return jsonify({'error':'cookies_text vacío'}), 400
+        # Validación mínima: debe contener al menos .youtube.com y PREF/CONSENT o ytc
+        if '.youtube.com' not in cookies_text:
+            return jsonify({'error':'Contenido no parece contener cookies de youtube'}), 400
+        import tempfile
+        tf = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        tf.write(cookies_text)
+        tf.flush(); tf.close()
+        UPLOADED_COOKIES_PATH = tf.name
+        return jsonify({'status':'ok','path':UPLOADED_COOKIES_PATH,'size':len(cookies_text)})
+    except Exception as e:
+        return jsonify({'error':str(e)}), 500
 
 @app.route('/formats', methods=['GET'])
 def get_formats():
