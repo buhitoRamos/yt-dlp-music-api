@@ -540,9 +540,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Intentar descarga con estrategias adaptadas al entorno y tipo de error
         success = False
         attempt = 1
-        # Siempre exactamente 2 intentos como solicitaste
-        max_attempts = 2
+        # Modo estricto 2 intentos configurable (por defecto ON). Fallback adaptativo opcional.
+        strict_two_attempts = os.environ.get('STRICT_TWO_ATTEMPTS','1') == '1'
+        allow_fallback = os.environ.get('ALLOW_FALLBACK','1') == '1'
+        max_attempts = 2 if strict_two_attempts else (6 if is_remote_server else 4)
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
+        DOWNLOADS_STATUS[job_id]['strict_two_attempts'] = strict_two_attempts
+        DOWNLOADS_STATUS[job_id]['allow_fallback'] = allow_fallback
+        fallback_engaged = False
         
         # Preparar proxies si definidos
         proxy_list_env = os.environ.get('PROXY_LIST', '').strip()
@@ -872,26 +877,71 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     'This video is not available' in stderr
                 ])
                 
-                # Si es error de verificación de bot, 429 o bloqueo general, intentar de nuevo
-                if (error_is_bot_check or error_is_429 or error_is_general_block) and attempt < max_attempts:
-                    error_type = 'bot_verification' if error_is_bot_check else 'rate_limit' if error_is_429 else 'general_block'
-                    DOWNLOADS_STATUS[job_id]['error_type'] = error_type
-                    if error_is_bot_check and not cookies_added:
-                        DOWNLOADS_STATUS[job_id]['requires_cookies'] = True
-                        pending_cookie_escalation = True  # Solicitar escalada temprana
-                        if first_bot_trigger_attempt is None:
-                            first_bot_trigger_attempt = attempt
-                            DOWNLOADS_STATUS[job_id]['bot_trigger_attempt'] = attempt
-                    DOWNLOADS_STATUS[job_id]['status'] = f'reintentando por {error_type} ({attempt + 1}/{max_attempts})'
-                    
-                    # Delay más largo para errores de bot
+                # Si es error de verificación de bot, 429 o bloqueo general, intentar de nuevo / o activar fallback
+                if (error_is_bot_check or error_is_429 or error_is_general_block):
+                    # Fallback: si estamos en modo estricto, es intento 1, y es bot_verification, ampliamos attempts si permitido
+                    if (error_is_bot_check and strict_two_attempts and allow_fallback and attempt == 1 and not fallback_engaged):
+                        fallback_engaged = True
+                        strict_two_attempts = False
+                        # Expandir a estrategia completa
+                        max_attempts = 6 if is_remote_server else 4
+                        DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
+                        DOWNLOADS_STATUS[job_id]['fallback_engaged'] = True
+                        DOWNLOADS_STATUS[job_id]['fallback_reason'] = 'bot_verification_after_fast_attempt1'
+                        DOWNLOADS_STATUS[job_id]['strict_two_attempts'] = False
+                        DOWNLOADS_STATUS[job_id]['status'] = 'activando fallback extendido'
+                        # Pequeña pausa estratégica antes de reintentar con nuevo set
+                        time.sleep(random.randint(3,6))
+                    if attempt < max_attempts:
+                        error_type = 'bot_verification' if error_is_bot_check else 'rate_limit' if error_is_429 else 'general_block'
+                        DOWNLOADS_STATUS[job_id]['error_type'] = error_type
+                        if error_is_bot_check and not cookies_added:
+                            DOWNLOADS_STATUS[job_id]['requires_cookies'] = True
+                            pending_cookie_escalation = True  # Solicitar escalada temprana
+                            if first_bot_trigger_attempt is None:
+                                first_bot_trigger_attempt = attempt
+                                DOWNLOADS_STATUS[job_id]['bot_trigger_attempt'] = attempt
+                        DOWNLOADS_STATUS[job_id]['status'] = f'reintentando por {error_type} ({attempt + 1}/{max_attempts})'
+                        # Delay específico
+                        base_delay = 0
+                        if error_is_bot_check:
+                            base_delay = random.randint(4,10) if not fallback_engaged else random.randint(6,12)
+                        elif error_is_429:
+                            base_delay = random.randint(3,8)
+                        elif error_is_general_block:
+                            base_delay = random.randint(2,6)
+                        if base_delay:
+                            DOWNLOADS_STATUS[job_id]['status'] = f'esperando {base_delay}s antes de intento {attempt+1}'
+                            time.sleep(base_delay)
+                        attempt += 1
+                        continue
+                    # Sin más intentos: registrar error final
+                    final_hint = None
                     if error_is_bot_check:
-                        extra_delay = random.randint(5, 15)
-                        DOWNLOADS_STATUS[job_id]['status'] = f'esperando {extra_delay}s extra por verificación de bot'
-                        time.sleep(extra_delay)
-                    
-                    attempt += 1
-                    continue
+                        if not cookies_added:
+                            final_hint = 'El servidor necesita cookies fuertes (SID, SAPISID). Sube cookies o define YOUTUBE_COOKIES.'
+                        elif strict_two_attempts and not allow_fallback:
+                            final_hint = 'Modo estricto 2 intentos activo. Desactiva STRICT_TWO_ATTEMPTS=0 para más estrategias.'
+                        else:
+                            final_hint = 'Bot verification persistente tras múltiples estrategias.'
+                    elif error_is_429:
+                        final_hint = 'Rate limit persistente. Añade cookies o activa fallback.'
+                    elif error_is_general_block:
+                        final_hint = 'Bloqueo general. Revisa URL o cookies.'
+                    DOWNLOADS_STATUS[job_id].update({
+                        'status': 'error',
+                        'error': stderr,
+                        'stdout': stdout,
+                        'final_hint': final_hint,
+                        'error_analysis': {
+                            'bot_check': error_is_bot_check,
+                            'rate_limit': error_is_429,
+                            'general_block': error_is_general_block,
+                            'other_error': not (error_is_bot_check or error_is_429 or error_is_general_block)
+                        }
+                    })
+                    return
+                # Si no entra en el bloque anterior, es otro error no recuperable y se maneja abajo
                 
                 # Si es otro tipo de error, fallar inmediatamente
                 DOWNLOADS_STATUS[job_id].update({
@@ -962,18 +1012,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             })
             
     except Exception as e:
-            DOWNLOADS_STATUS[job_id].update({
-                'status': 'error',
-                'error': stderr,
-                'stdout': stdout,
-                'attempts_used': attempt-1,
-                'error_analysis': {
-                    'bot_check': error_is_bot_check,
-                    'rate_limit': error_is_429,
-                    'general_block': error_is_general_block,
-                    'other_error': not (error_is_bot_check or error_is_429 or error_is_general_block)
-                }
-            })
+        # Error inesperado fuera del flujo normal
+        DOWNLOADS_STATUS.setdefault(job_id, {})
+        DOWNLOADS_STATUS[job_id].update({
+            'status': 'error',
+            'unexpected_error': True,
+            'error': str(e),
+            'error_note': 'Excepción no controlada en download_worker'
+        })
 
 @app.route('/environment', methods=['GET'])
 def get_environment_info():
