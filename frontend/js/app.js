@@ -84,29 +84,33 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Botón para elegir carpeta local real (File System Access API)
+    // Botón para elegir carpeta (solo tras finalizar)
     const pickBtn = document.getElementById('pickLocalDirBtn');
     if (pickBtn) {
         pickBtn.addEventListener('click', async ()=>{
+            if (!lastStatusCache || lastStatusCache.status !== 'completado') {
+                showTemporaryMessage('Aún no finaliza');
+                return;
+            }
             if (!('showDirectoryPicker' in window)) {
-                showTemporaryMessage('⚠️ Tu navegador no soporta File System Access API');
+                showTemporaryMessage('⚠️ Sin File System API: generando enlaces...');
+                autoSaveAndCleanup(lastStatusCache); // fallback -> enlaces
                 return;
             }
             try {
+                pickBtn.disabled = true;
+                pickBtn.textContent = '⏳ Copiando...';
                 localDirectoryHandle = await window.showDirectoryPicker();
                 const label = document.getElementById('chosenFolderLabel');
                 if (label) {
-                    label.textContent = `Usando: ${localDirectoryHandle.name}`;
+                    label.textContent = `Carpeta: ${localDirectoryHandle.name}`;
                     label.style.color = '#0a7523';
                 }
-                showTemporaryMessage('📁 Carpeta autorizada (se guardará automáticamente al finalizar)');
-                pickBtn.textContent = '✅ Carpeta lista';
-                pickBtn.disabled = true; // Evita re-pedir permisos
-                // Si ya terminó una descarga y aún no guardamos, intentar guardar ahora
-                if (lastStatusCache && lastStatusCache.status === 'completado' && lastStatusCache.download_urls) {
-                    autoSaveAndCleanup(lastStatusCache).catch(()=>{});
-                }
+                await autoSaveAndCleanup(lastStatusCache);
+                pickBtn.textContent = '✅ Copiado y borrado';
             } catch(e) {
+                pickBtn.disabled = false;
+                pickBtn.textContent = '💾 Copiar a carpeta...';
                 showTemporaryMessage('❌ Cancelado');
             }
         });
@@ -263,13 +267,12 @@ function updateStatusDisplay(status) {
         case 'completado':
             showStatus('success', '✅ Descarga completada');
             setProgress(100);
-                if (status.files && status.files.length > 0) {
-                    showFiles(status.files);
-                }
-            // Si el navegador soporta FS API y hay URLs, intentar auto-guardar si ya se autorizó
-            if (status.download_urls && localDirectoryHandle) {
-                autoSaveAndCleanup(status).catch(()=>{});
+            if (status.files && status.files.length > 0) {
+                showFiles(status.files);
             }
+            // Mostrar módulo de carpeta ahora
+            const chooser = document.getElementById('folderChooserWrapper');
+            if (chooser) chooser.style.display = 'block';
             if (status.stdout) {
                 showLog(status.stdout);
             }

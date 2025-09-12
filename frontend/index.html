@@ -78,17 +78,6 @@
                     </div>
                 </div>
                 
-                <!-- Simplificado: un solo botón para elegir carpeta local (si el navegador lo soporta) -->
-                <input type="hidden" id="output_dir" name="output_dir" value="~/Downloads/yt-dlp" />
-                <div class="form-group" id="folderChooserWrapper">
-                    <label>📁 Carpeta local:</label>
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <button type="button" class="folder-btn" id="pickLocalDirBtn" style="padding:6px 10px;">📂 Elegir carpeta</button>
-                        <span id="chosenFolderLabel" style="font-size:0.75rem; color:#555;">(usará Descargas por defecto)</span>
-                    </div>
-                    <small id="fsNote" style="color:#666; font-size:0.7rem; display:block; margin-top:4px;">Si tu navegador no permite elegir carpeta, el archivo se descargará normalmente.</small>
-                </div>
-                
                 <button type="submit" class="btn" id="downloadBtn">
                     🚀 Iniciar Descarga
                 </button>
@@ -96,6 +85,19 @@
                 <button type="button" class="btn btn-cancel" id="cancelBtn" style="display: none;">
                     ❌ Cancelar Descarga
                 </button>
+
+                  <!-- Simplificado: un solo botón para elegir carpeta local (si el navegador lo soporta) -->
+                  <input type="hidden" id="output_dir" name="output_dir" value="~/Downloads/yt-dlp" />
+                  <div class="form-group" id="folderChooserWrapper" style="display:none;">
+                      <label>📁 Guardar localmente:</label>
+                      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                          <button type="button" class="folder-btn" id="pickLocalDirBtn" style="padding:6px 10px;">� Copiar a
+                              carpeta...</button>
+                          <span id="chosenFolderLabel" style="font-size:0.75rem; color:#555;">(aparecerá al completar la descarga)</span>
+                      </div>
+                      <small id="fsNote" style="color:#666; font-size:0.7rem; display:block; margin-top:4px;">Tras completarse podrás
+                          copiar y borrar del servidor. Si tu navegador no soporta elegir carpeta se mostrarán enlaces.</small>
+                  </div>
             </form>
             
             <div id="statusContainer" class="status-container">
