@@ -52,6 +52,30 @@ def prefetch_metadata(url, timeout=18):
     except Exception as e:
         return None, str(e)[:500]
 
+    def multi_prefetch(url, clients, timeout=14):
+        """Intenta prefetch usando distintos player_client para aumentar chance de metadata.
+        Devuelve (data, client_usado, error_acumulado)"""
+        errors = []
+        for c in clients:
+            cmd = [
+                'python3','-m','yt_dlp',
+                '--dump-json','--no-check-certificate','--ignore-errors','--skip-download',
+                '--extractor-args', f'youtube:player_client={c}', url
+            ]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    line = proc.stdout.strip().splitlines()[0]
+                    try:
+                        data = json.loads(line)
+                        return data, c, None
+                    except Exception as je:
+                        errors.append(f'{c}:json_error:{je}')
+                else:
+                    errors.append(f'{c}:{proc.stderr.strip()[:120]}')
+            except Exception as e:
+                errors.append(f'{c}:{str(e)[:120]}')
+        return None, None, ' | '.join(errors)[:500]
 def head_validate_small(url, timeout=8):
     """Validación rápida haciendo petición parcial (Range) para detectar bloqueos tempranos.
     Devuelve True si responde 2xx/206, False en error."""
@@ -241,14 +265,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             if data:
                 prefetch_data = data
                 DOWNLOADS_STATUS[job_id]['prefetch'] = 'ok'
-                DOWNLOADS_STATUS[job_id]['prefetch_title'] = data.get('title', '')[:120]
+                DOWNLOADS_STATUS[job_id]['prefetch_title'] = data.get('title','')[:120]
                 DOWNLOADS_STATUS[job_id]['prefetch_duration'] = data.get('duration')
-                # Tratamos de extraer primera URL de audio para validación temprana
                 try:
                     fmts = data.get('formats') or []
                     audio_only = [f for f in fmts if f.get('vcodec') in (None,'none') and f.get('acodec') not in (None,'none')]
-                    # Ordenar por abr descendente
-                    audio_only.sort(key=lambda f: f.get('abr', 0), reverse=True)
+                    audio_only.sort(key=lambda f: f.get('abr',0), reverse=True)
                     if audio_only:
                         first_audio_url = audio_only[0].get('url')
                 except Exception:
@@ -454,6 +476,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         max_attempts = min(max_attempts, 9)
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         
+        # Preparar proxies si definidos
+        proxy_list_env = os.environ.get('PROXY_LIST', '').strip()
+        rotate_proxies = os.environ.get('ROTATE_PROXIES', '1') == '1'
+        proxies = [p.strip() for p in proxy_list_env.split(',') if p.strip()] if proxy_list_env else []
+        if proxies:
+            DOWNLOADS_STATUS[job_id]['proxies_enabled'] = len(proxies)
         while not success and attempt <= max_attempts:
             DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
             
@@ -689,6 +717,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                                 DOWNLOADS_STATUS[job_id]['cookies_attempt'] = 'file_attempt4'
                 
                 cmd_retry.extend(retry_options)
+                # Asignar proxy rotativo
+                if proxies:
+                    idx = (attempt - 1) % len(proxies) if rotate_proxies else 0
+                    cmd_retry.extend(['--proxy', proxies[idx]])
+                    DOWNLOADS_STATUS[job_id]['proxy_used'] = proxies[idx]
                 
                 # Configurar formato (mantener configuración original)
                 if format_type == 'mp3':
@@ -705,6 +738,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 
                 # Delay progresivo antes del reintento
                 delay = random.randint(3 + attempt, 8 + (attempt * 2))
+                # Si seguimos con bot_verification continuo y sin cookies reales, aumentar delay
+                if DOWNLOADS_STATUS[job_id].get('error_type') == 'bot_verification' and not cookies_added and attempt >= 3:
+                    delay += 5
                 DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
                 time.sleep(delay)
                 
@@ -758,6 +794,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 if (error_is_bot_check or error_is_429 or error_is_general_block) and attempt < max_attempts:
                     error_type = 'bot_verification' if error_is_bot_check else 'rate_limit' if error_is_429 else 'general_block'
                     DOWNLOADS_STATUS[job_id]['error_type'] = error_type
+                    if error_is_bot_check and not cookies_added:
+                        DOWNLOADS_STATUS[job_id]['requires_cookies'] = True
                     DOWNLOADS_STATUS[job_id]['status'] = f'reintentando por {error_type} ({attempt + 1}/{max_attempts})'
                     
                     # Delay más largo para errores de bot
