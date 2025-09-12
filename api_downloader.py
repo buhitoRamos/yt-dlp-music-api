@@ -507,21 +507,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         success = False
         attempt = 1
         # Modo estricto 2 intentos configurable (por defecto ON). Fallback adaptativo opcional.
-        # Modo simple opcional para reducir intentos y ruido
-        simple_mode = os.environ.get('SIMPLE_MODE','0') == '1'
         strict_two_attempts = os.environ.get('STRICT_TWO_ATTEMPTS','1') == '1'
         allow_fallback = os.environ.get('ALLOW_FALLBACK','1') == '1'
-        if simple_mode:
-            # Forzar máximo 2 intentos y desactivar fallback ampliado
-            strict_two_attempts = True
-            allow_fallback = False
-            max_attempts = 2
-        else:
-            max_attempts = 2 if strict_two_attempts else (6 if is_remote_server else 4)
+        max_attempts = 2 if strict_two_attempts else (6 if is_remote_server else 4)
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         DOWNLOADS_STATUS[job_id]['strict_two_attempts'] = strict_two_attempts
         DOWNLOADS_STATUS[job_id]['allow_fallback'] = allow_fallback
-        DOWNLOADS_STATUS[job_id]['simple_mode'] = simple_mode
         fallback_engaged = False
         
         # Preparar proxies si definidos
@@ -563,12 +554,6 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     pending_cookie_escalation = False
             
             if attempt > 1:
-                if simple_mode:
-                    # No construir cadenas complejas en modo simple; abortar directamente
-                    DOWNLOADS_STATUS[job_id]['status'] = 'error'
-                    DOWNLOADS_STATUS[job_id]['error'] = 'Fallo en primer intento (simple_mode activo, sin reintentos complejos)'
-                    DOWNLOADS_STATUS[job_id]['attempts_used'] = attempt-1
-                    return
                 # Crear comando modificado para reintentos específicos anti-bot
                 cmd_retry = ['python3', '-m', 'yt_dlp']
                 
@@ -861,7 +846,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Si es error de verificación de bot, 429 o bloqueo general, intentar de nuevo / o activar fallback
                 if (error_is_bot_check or error_is_429 or error_is_general_block):
                     # Fallback: si estamos en modo estricto, es intento 1, y es bot_verification, ampliamos attempts si permitido
-                    if (error_is_bot_check and strict_two_attempts and allow_fallback and attempt == 1 and not fallback_engaged and not simple_mode):
+                    if (error_is_bot_check and strict_two_attempts and allow_fallback and attempt == 1 and not fallback_engaged):
                         fallback_engaged = True
                         strict_two_attempts = False
                         # Expandir a estrategia completa
