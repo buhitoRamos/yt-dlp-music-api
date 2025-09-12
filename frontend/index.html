@@ -79,35 +79,15 @@
                     </div>
                 </div>
                 
-                <div class="form-group">
-                    <label for="output_dir">📁 Carpeta de descarga (obligatorio):</label>
-                    <div class="folder-selector">
-                        <input 
-                            type="text" 
-                            id="output_dir" 
-                            name="output_dir" 
-                            required
-                            placeholder="Ej: /Users/tuusuario/Downloads/musica"
-                            readonly
-                        >
-                        <input 
-                            type="file" 
-                            id="folderInput" 
-                            class="folder-input" 
-                            webkitdirectory 
-                            directory
-                        >
-                        <button type="button" class="folder-btn" onclick="selectFolder()">
-                            📂 Seleccionar Carpeta
-                        </button>
+                <!-- Simplificado: un solo botón para elegir carpeta local (si el navegador lo soporta) -->
+                <input type="hidden" id="output_dir" name="output_dir" value="~/Downloads/yt-dlp" />
+                <div class="form-group" id="folderChooserWrapper">
+                    <label>📁 Carpeta local:</label>
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                        <button type="button" class="folder-btn" id="pickLocalDirBtn" style="padding:6px 10px;">📂 Elegir carpeta</button>
+                        <span id="chosenFolderLabel" style="font-size:0.75rem; color:#555;">(usará Descargas por defecto)</span>
                     </div>
-                    <small style="color: #666; font-size: 0.85rem;">
-                        💡 <strong>Selector nativo:</strong> Selecciona cualquier archivo dentro de la carpeta que quieras usar<br>
-                        ⚡ <strong>Rutas rápidas:</strong> 
-                        <button type="button" onclick="setQuickPath('~/Downloads')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Downloads</button> | 
-                        <button type="button" onclick="setQuickPath('~/Music')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Music</button> | 
-                        <button type="button" onclick="setQuickPath('~/Desktop')" style="background:none;border:none;color:#667eea;text-decoration:underline;cursor:pointer;font-size:0.85rem;">Desktop</button>
-                    </small>
+                    <small id="fsNote" style="color:#666; font-size:0.7rem; display:block; margin-top:4px;">Si tu navegador no permite elegir carpeta, el archivo se descargará normalmente.</small>
                 </div>
                 
                 <button type="submit" class="btn" id="downloadBtn">
@@ -116,9 +96,6 @@
                 
                 <button type="button" class="btn btn-cancel" id="cancelBtn" style="display: none;">
                     ❌ Cancelar Descarga
-                </button>
-                <button type="button" class="btn alt" id="pickLocalDirBtn" style="margin-top:8px; background:#444;">
-                    📂 Elegir carpeta local (guardar directo)
                 </button>
             </form>
             
@@ -135,14 +112,9 @@
                 <div id="jobInfo" style="margin-top: 10px; font-size: 0.9rem; color: #666;"></div>
                 <div id="strategyInfo" style="margin-top:6px; font-size:0.75rem; color:#444; display:none;"></div>
                 
-                <div id="filesContainer" class="files-list" style="display: none;">
-                    <strong>✅ Archivos descargados:</strong>
+                <div id="filesContainer" class="files-list" style="display:none;">
+                    <strong>✅ Archivo listo:</strong>
                     <div id="filesList"></div>
-                    <div id="localSaveActions" style="display:none; margin-top:8px;">
-                        <button type="button" class="mini-btn" id="saveLocallyBtn">💾 Guardar en carpeta elegida</button>
-                        <button type="button" class="mini-btn alt" id="cleanupRemoteBtn">🧹 Limpiar servidor</button>
-                        <span id="localSaveStatus" style="font-size:0.7rem; margin-left:6px; color:#555;"></span>
-                    </div>
                 </div>
                 
                 <div id="logContainer" style="display: none;">

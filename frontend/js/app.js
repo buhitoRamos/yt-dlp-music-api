@@ -7,80 +7,7 @@ let statusInterval = null;
 let localDirectoryHandle = null; // File System Access API directory handle
 let lastStatusCache = null;
 
-// Función para seleccionar carpeta
-async function selectFolder() {
-    try {
-        // Intentar usar la nueva File System Access API (Chrome 86+)
-        if ('showDirectoryPicker' in window) {
-            const directoryHandle = await window.showDirectoryPicker();
-            const folderPath = directoryHandle.name;
-            
-            // Construir ruta completa (aproximada)
-            const outputField = document.getElementById('output_dir');
-            outputField.value = `~/Downloads/${folderPath}`;
-            outputField.readOnly = false;
-            outputField.style.backgroundColor = '#f0f8ff';
-            
-            showTemporaryMessage('✅ Carpeta seleccionada con File System API');
-            return;
-        }
-    } catch (error) {
-        console.log('File System Access API no disponible o cancelado, usando fallback');
-    }
-    
-    // Fallback: usar el selector tradicional
-    const folderInput = document.getElementById('folderInput');
-    folderInput.click();
-}
-
-// Función para obtener el directorio home del usuario
-function getUserHomeDirectory() {
-    const isMac = navigator.userAgent.includes('Mac');
-    const isWindows = navigator.userAgent.includes('Windows');
-    
-    if (isMac) {
-        // Si estamos en desarrollo local y la URL contiene la ruta del usuario
-        if (window.location.href.includes('/Users/')) {
-            const userMatch = window.location.href.match(/\/Users\/([^\/]+)/);
-            if (userMatch) {
-                return `/Users/${userMatch[1]}`;
-            }
-        }
-        // Intentar detectar desde el path actual del archivo
-        try {
-            // Usar el usuario O002545 que vemos en el contexto
-            return '/Users/O002545';
-        } catch (e) {
-            return '/Users/usuario';
-        }
-    } else if (isWindows) {
-        return 'C:\\Users\\usuario';
-    } else {
-        // Linux u otros sistemas Unix
-        return '/home/usuario';
-    }
-}
-
-// Función para rutas rápidas
-function setQuickPath(path) {
-    const outputDir = document.getElementById('output_dir');
-    
-    // Expandir ~ a la ruta del usuario
-    if (path.startsWith('~/')) {
-        const homeDir = getUserHomeDirectory();
-        path = path.replace('~', homeDir);
-    }
-    
-    outputDir.value = path;
-    outputDir.readOnly = false;
-    outputDir.style.backgroundColor = '#f0f8ff';
-    outputDir.placeholder = 'Edita la ruta si es necesario';
-    
-    // Enfocar el campo para que el usuario pueda editarlo
-    outputDir.focus();
-    
-    showTemporaryMessage(`✅ Ruta configurada. Puedes editarla si es necesario.`);
-}
+// (Simplificado) Eliminadas funciones antiguas de selección manual y manipulación de rutas locales.
 
 // Inicializar eventos cuando se carga la página
 document.addEventListener('DOMContentLoaded', function() {
@@ -141,69 +68,24 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             try {
                 localDirectoryHandle = await window.showDirectoryPicker();
-                showTemporaryMessage('📁 Carpeta local autorizada');
-                pickBtn.textContent = '📁 Carpeta autorizada';
-                pickBtn.disabled = true;
+                const label = document.getElementById('chosenFolderLabel');
+                if (label) {
+                    label.textContent = `Usando: ${localDirectoryHandle.name}`;
+                    label.style.color = '#0a7523';
+                }
+                showTemporaryMessage('📁 Carpeta autorizada (se guardará automáticamente al finalizar)');
+                pickBtn.textContent = '✅ Carpeta lista';
+                pickBtn.disabled = true; // Evita re-pedir permisos
+                // Si ya terminó una descarga y aún no guardamos, intentar guardar ahora
+                if (lastStatusCache && lastStatusCache.status === 'completado' && lastStatusCache.download_urls) {
+                    autoSaveAndCleanup(lastStatusCache).catch(()=>{});
+                }
             } catch(e) {
                 showTemporaryMessage('❌ Cancelado');
             }
         });
     }
 
-    // Guardar localmente
-    const saveLocallyBtn = document.getElementById('saveLocallyBtn');
-    if (saveLocallyBtn) {
-        saveLocallyBtn.addEventListener('click', async ()=>{
-            if (!lastStatusCache || !lastStatusCache.download_urls) {
-                showTemporaryMessage('No hay archivos para guardar');
-                return;
-            }
-            if (!localDirectoryHandle) {
-                showTemporaryMessage('Elige primero una carpeta local');
-                return;
-            }
-            const statusLabel = document.getElementById('localSaveStatus');
-            statusLabel.textContent = 'Guardando...';
-            let ok = 0; let fail = 0;
-            for (let i=0;i<lastStatusCache.download_urls.length;i++) {
-                const url = lastStatusCache.download_urls[i];
-                try {
-                    const resp = await fetch(url);
-                    if (!resp.ok) throw new Error('HTTP '+resp.status);
-                    const blob = await resp.blob();
-                    const serverPath = (lastStatusCache.files && lastStatusCache.files[i]) || `file_${i}`;
-                    const baseName = serverPath.split('/').pop();
-                    const fileHandle = await localDirectoryHandle.getFileHandle(baseName, {create:true});
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(blob);
-                    await writable.close();
-                    ok++;
-                } catch(err) {
-                    console.error('Save error', err);
-                    fail++;
-                }
-            }
-            statusLabel.textContent = `Guardados: ${ok}, Fallidos: ${fail}`;
-        });
-    }
-
-    // Limpiar remoto
-    const cleanupBtn = document.getElementById('cleanupRemoteBtn');
-    if (cleanupBtn) {
-        cleanupBtn.addEventListener('click', async ()=>{
-            if (!currentJobId) return;
-            try {
-                const r = await fetch(`${API_BASE}/cleanup/${currentJobId}`, {method:'POST'});
-                const d = await r.json();
-                showTemporaryMessage('🧹 Limpieza remota realizada');
-                document.getElementById('localSaveStatus').textContent = 'Servidor limpio';
-                // Forzar refresco de estado para ocultar botones
-                setTimeout(checkStatus, 800);
-            } catch(e) {
-                showTemporaryMessage('Error limpiando remoto');
-            }
-        });
-    }
     if (clearBtn && cookieArea) {
         clearBtn.addEventListener('click', () => {
             cookieArea.value='';
@@ -212,54 +94,8 @@ document.addEventListener('DOMContentLoaded', function() {
             try { localStorage.removeItem('yt_cookies_text'); } catch(e){}
         });
     }
-    
-    // Manejar selección de carpeta
-    document.getElementById('folderInput').addEventListener('change', function(e) {
-        if (e.target.files.length > 0) {
-            // Obtener la ruta de la primera archivo seleccionado
-            const file = e.target.files[0];
-            let folderPath = file.webkitRelativePath;
-            
-            // Extraer la ruta de la carpeta (sin el archivo)
-            const pathParts = folderPath.split('/');
-            
-            // Si hay más de una parte, es una carpeta
-            if (pathParts.length > 1) {
-                pathParts.pop(); // Remover el nombre del archivo
-                const selectedPath = pathParts.join('/');
-                
-                // Intentar construir la ruta completa
-                try {
-                    const homeDir = getUserHomeDirectory();
-                    const fullPath = `${homeDir}/Downloads/${selectedPath}`;
-                    document.getElementById('output_dir').value = fullPath;
-                } catch (error) {
-                    // Fallback simple
-                    document.getElementById('output_dir').value = `~/Downloads/${selectedPath}`;
-                }
-            } else {
-                // Si solo hay un nivel, usar el directorio padre
-                const fileName = pathParts[0];
-                const parentDir = fileName.split('.')[0]; // Usar nombre sin extensión como carpeta
-                const homeDir = getUserHomeDirectory();
-                document.getElementById('output_dir').value = `${homeDir}/Downloads/${parentDir}_downloads`;
-            }
-            
-            // Hacer el campo editable para ajustes
-            const outputField = document.getElementById('output_dir');
-            outputField.readOnly = false;
-            outputField.style.backgroundColor = '#f0f8ff';
-            
-            // Mostrar mensaje de éxito
-            showTemporaryMessage('✅ Carpeta seleccionada correctamente');
-        }
-    });
 
-    // Permitir edición manual del campo
-    document.getElementById('output_dir').addEventListener('click', function() {
-        this.readOnly = false;
-        this.placeholder = 'Escribe la ruta completa, ej: /Users/tuusuario/Downloads/musica';
-    });
+    // Ya no se permite edición manual de output_dir (simplificado / oculto)
 
     // Manejar envío del formulario
     document.getElementById('downloadForm').addEventListener('submit', async function(e) {
@@ -401,14 +237,9 @@ function updateStatusDisplay(status) {
         case 'completado':
             showStatus('success', '✅ Descarga completada');
             setProgress(100);
-            if (status.files && status.files.length > 0) {
-                showFiles(status.files);
-                // Mostrar acciones locales si hay soporte API y archivos
-                const act = document.getElementById('localSaveActions');
-                if (act) {
-                    act.style.display = 'block';
+                if (status.files && status.files.length > 0) {
+                    showFiles(status.files);
                 }
-            }
             // Si el navegador soporta FS API y hay URLs, intentar auto-guardar si ya se autorizó
             if (status.download_urls && localDirectoryHandle) {
                 autoSaveAndCleanup(status).catch(()=>{});
@@ -482,7 +313,7 @@ function updateStatusDisplay(status) {
 async function autoSaveAndCleanup(status) {
     try {
         const urls = status.download_urls || [];
-        if (!urls.length) return;
+        if (!urls.length || !localDirectoryHandle) return;
         let saved = 0;
         for (let i=0;i<urls.length;i++) {
             const u = urls[i];
@@ -497,7 +328,16 @@ async function autoSaveAndCleanup(status) {
             await writable.close();
             saved++;
         }
-        showTemporaryMessage(`💾 Auto-guardados ${saved}/${urls.length}`);
+        showTemporaryMessage(`💾 Guardados localmente ${saved}/${urls.length}`);
+        // Intentar limpieza remota automática si hay job
+        if (currentJobId) {
+            try {
+                await fetch(`${API_BASE}/cleanup/${currentJobId}`, {method:'POST'});
+                showTemporaryMessage('🧹 Archivos temporales limpiados del servidor');
+            } catch(e) {
+                console.warn('Cleanup remoto falló', e);
+            }
+        }
     } catch(e) {
         console.warn('Auto save failed', e);
     }
