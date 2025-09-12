@@ -82,6 +82,60 @@ function setQuickPath(path) {
 
 // Inicializar eventos cuando se carga la página
 document.addEventListener('DOMContentLoaded', function() {
+    // Modal cookies
+    const openCookies = document.getElementById('openCookies');
+    const modal = document.getElementById('cookiesModal');
+    const closeCookies = document.getElementById('closeCookies');
+    const uploadBtn = document.getElementById('uploadCookiesBtn');
+    const clearBtn = document.getElementById('clearCookiesBtn');
+    const cookieArea = document.getElementById('cookieText');
+    const cookiesStatus = document.getElementById('cookiesStatus');
+    if (openCookies && modal) {
+        openCookies.addEventListener('click', ()=> { modal.style.display='flex'; });
+    }
+    if (closeCookies && modal) {
+        closeCookies.addEventListener('click', ()=> { modal.style.display='none'; });
+    }
+    if (modal) {
+        modal.addEventListener('click', (e)=> { if (e.target === modal) modal.style.display='none'; });
+    }
+    // Restaurar de localStorage si existe
+    try {
+        const saved = localStorage.getItem('yt_cookies_text');
+        if (saved && cookieArea) cookieArea.value = saved;
+    } catch(e){}
+    if (uploadBtn && cookieArea) {
+        uploadBtn.addEventListener('click', async () => {
+            const txt = cookieArea.value.trim();
+            if (!txt) { cookiesStatus.textContent = 'Vacío'; cookiesStatus.className='cookies-status err'; return; }
+            cookiesStatus.textContent = 'Subiendo...'; cookiesStatus.className='cookies-status';
+            try {
+                const resp = await fetch(`${API_BASE}/upload-cookies`, {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({cookies_text: txt})
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    cookiesStatus.textContent = '✅ Cargadas'; cookiesStatus.className='cookies-status ok';
+                    try { localStorage.setItem('yt_cookies_text', txt); } catch(e){}
+                    showTemporaryMessage('🍪 Cookies cargadas');
+                } else {
+                    cookiesStatus.textContent = '❌ ' + (data.error || 'Error'); cookiesStatus.className='cookies-status err';
+                }
+            } catch(err) {
+                cookiesStatus.textContent = '❌ Conexión'; cookiesStatus.className='cookies-status err';
+            }
+        });
+    }
+    if (clearBtn && cookieArea) {
+        clearBtn.addEventListener('click', () => {
+            cookieArea.value='';
+            cookiesStatus.textContent='';
+            cookiesStatus.className='cookies-status';
+            try { localStorage.removeItem('yt_cookies_text'); } catch(e){}
+        });
+    }
     
     // Manejar selección de carpeta
     document.getElementById('folderInput').addEventListener('change', function(e) {
@@ -137,11 +191,13 @@ document.addEventListener('DOMContentLoaded', function() {
         
         const formData = new FormData(this);
         const data = Object.fromEntries(formData);
+        // Ajustes de formato/calidad: si formato es mp4 ignorar quality
+        if (data.format === 'mp4') {
+            delete data.quality; // backend puede usar mejor calidad por defecto para video
+        }
         // Añadir flags avanzados
-        const fl = document.getElementById('force_local');
-        const fr = document.getElementById('force_remote');
-        if (fl) data.force_local = fl.checked ? '1' : '0';
-        if (fr) data.force_remote = fr.checked ? '1' : '0';
+    const fl = document.getElementById('force_local'); // Puede no existir tras simplificación
+    if (fl) data.force_local = fl.checked ? '1' : '0';
         
         // Mostrar estado inicial
         showStatus('loading', 'Iniciando descarga...');
@@ -209,6 +265,26 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
     });
+});
+
+// Toggle de calidad según formato
+document.addEventListener('change', function(e){
+    if (e.target && e.target.id === 'format') {
+        const fmt = e.target.value;
+        const wrapper = document.getElementById('qualityWrapper');
+        if (!wrapper) return;
+        if (fmt === 'mp4') {
+            wrapper.style.opacity = '0.35';
+            wrapper.style.pointerEvents = 'none';
+            const q = document.getElementById('quality');
+            if (q) q.setAttribute('disabled','disabled');
+        } else {
+            wrapper.style.opacity = '1';
+            wrapper.style.pointerEvents = 'auto';
+            const q = document.getElementById('quality');
+            if (q) q.removeAttribute('disabled');
+        }
+    }
 });
 
 // Verificar estado de descarga
@@ -285,6 +361,7 @@ function updateStatusDisplay(status) {
         if (status.force_mode) lines.push(`⚙️ Modo forzado: ${status.force_mode}`);
         if (status.anti_bot_level) lines.push(`🛡️ Nivel anti-bot: ${status.anti_bot_level}`);
         if (status.chosen_initial_client) lines.push(`🎯 Cliente inicial: <code>${status.chosen_initial_client}</code>${status.cache_hit ? ' <span class="badge cache-hit">CACHE</span>' : ''}`);
+        if (status.prefetch_client) lines.push(`🛰 Prefetch client: <code>${status.prefetch_client}</code>`);
         if (status.prefetch_title) {
             const dur = status.prefetch_duration ? ` (${status.prefetch_duration}s)` : '';
             lines.push(`🕵️ Prefetch: <em>${escapeHtml(status.prefetch_title).substring(0,80)}</em>${dur}`);
@@ -300,8 +377,11 @@ function updateStatusDisplay(status) {
             }
             lines.push(`� HEAD check: ${hcVal}`);
         }
-        if (status.requires_cookies) lines.push(`🍪 Requiere cookies: <span class="badge warn">SI</span>`);
+    if (status.requires_cookies) lines.push(`🍪 Requiere cookies: <span class="badge warn">SI</span>`);
         else if (status.requires_cookies === false) lines.push(`🍪 Requiere cookies: <span class="badge ok">no</span>`);
+    if (status.cookie_stage) lines.push(`🍪 Etapa cookies: <code>${status.cookie_stage}</code>`);
+    if (status.bot_trigger_attempt) lines.push(`🚨 Bot detectado en intento ${status.bot_trigger_attempt}`);
+    if (status.auto_cookies_unavailable) lines.push('🚫 Perfiles navegador no disponibles (hosting)');
         if (status.cookies) lines.push(`🍪 ${status.cookies}`);
         if (status.error_type) lines.push(`🚧 Error previo: ${status.error_type}`);
         if (status.info) lines.push(`ℹ️ ${escapeHtml(status.info)}`);

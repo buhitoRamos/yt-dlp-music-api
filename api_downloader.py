@@ -389,10 +389,23 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 '--sleep-interval','2','--max-sleep-interval','5','--extractor-args','youtube:player_client=web',
                 '--no-warnings','--ignore-errors','--socket-timeout','60','--fragment-retries','15','--retries','15'
             ]
+            # Detectar disponibilidad de perfiles locales reales (solo tiene sentido en host con navegadores instalados)
+            def browser_profile_exists():
+                home = os.path.expanduser('~')
+                chrome_path = os.path.join(home, '.config', 'google-chrome')
+                firefox_path = os.path.join(home, '.mozilla', 'firefox')
+                return (os.path.isdir(chrome_path) or os.path.isdir(firefox_path))
+
+            auto_skip = False
+            if force_local and is_remote_server_detected and not browser_profile_exists():
+                # Estás forzando local en un hosting sin bases de datos de cookies -> saltar
+                auto_skip = True
+                DOWNLOADS_STATUS[job_id]['auto_cookies_unavailable'] = True
             skip_browser_cookie_scan = (
                 os.environ.get('DISABLE_BROWSER_COOKIES') == '1' or
                 os.environ.get('FORCE_LOCAL_NO_BROWSER') == '1' or
-                (force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1')
+                (force_local and os.environ.get('NO_BROWSER_RUNTIME') == '1') or
+                auto_skip
             )
             browser_cookies_added = False
             if not skip_browser_cookie_scan:
@@ -413,6 +426,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 if skip_browser_cookie_scan:
                     DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic_no_browser'
                     DOWNLOADS_STATUS[job_id]['auto_cookies'] = 'omitido_scan_navegador'
+                    if auto_skip:
+                        DOWNLOADS_STATUS[job_id]['auto_cookies_reason'] = 'no_browser_profiles_in_remote'
                 else:
                     DOWNLOADS_STATUS[job_id]['anti_bot_level'] = 'local_basic'
 
