@@ -121,6 +121,18 @@ def get_random_user_agent():
     ]
     return random.choice(user_agents)
 
+def detect_cookies_strength():
+    """Evalúa fuerza de cookies en variable de entorno YOUTUBE_COOKIES.
+    Devuelve 'strong', 'synthetic', 'none'. (Synthetic se infiere por cookie_stage más adelante)."""
+    ck = os.environ.get('YOUTUBE_COOKIES') or ''
+    if not ck:
+        return 'none'
+    strong_markers = ['SID=', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID', 'LOGIN_INFO', 'VISITOR_INFO1_LIVE']
+    for m in strong_markers:
+        if m in ck:
+            return 'strong'
+    return 'none'
+
 @app.route('/api')
 def api_info():
     return jsonify({
@@ -438,11 +450,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         cookies_added = False
         temp_cookies_path = None
         global UPLOADED_COOKIES_PATH
+        cookies_strength = 'none'
         if UPLOADED_COOKIES_PATH and os.path.exists(UPLOADED_COOKIES_PATH):
             cmd += ['--cookies', UPLOADED_COOKIES_PATH]
             DOWNLOADS_STATUS[job_id]['cookies'] = 'cookies_upload_runtime'
             DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'uploaded_initial'
             cookies_added = True
+            cookies_strength = 'strong'  # Asumimos que si el usuario subió, son buenas
         elif os.environ.get('YOUTUBE_COOKIES'):
             import tempfile
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
@@ -452,6 +466,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['cookies'] = 'env_variable'
             DOWNLOADS_STATUS[job_id]['cookie_stage'] = 'env_initial'
             cookies_added = True
+            cookies_strength = detect_cookies_strength()
         elif cookies_file:
             if os.path.exists(cookies_file):
                 cmd += ['--cookies', cookies_file]
@@ -493,6 +508,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         pending_cookie_escalation = False
         first_bot_trigger_attempt = None
 
+        # Fast mode: si strong cookies en entorno remoto, habilitar ruta rápida
+        fast_mode = False
+        if is_remote_server and cookies_strength == 'strong':
+            fast_mode = True
+            DOWNLOADS_STATUS[job_id]['fast_mode'] = True
+            DOWNLOADS_STATUS[job_id]['fast_mode_reason'] = 'strong_cookies_remote'
+        DOWNLOADS_STATUS[job_id]['cookies_strength'] = cookies_strength
+
         # Formato/naming
         if format_type == 'mp3':
             cmd += ['-x','--audio-format','mp3','--audio-quality', quality]
@@ -512,8 +535,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         output_template = os.path.join(output_dir, template)
         cmd.extend(['-o', output_template])
         
-        # Agregar opciones adicionales
-        cmd.extend(['--write-info-json', '--no-playlist' if 'playlist' not in url else ''])
+        # Agregar opciones adicionales (en fast_mode omitimos write-info-json para velocidad)
+        if fast_mode:
+            cmd.extend(['--no-playlist' if 'playlist' not in url else ''])
+        else:
+            cmd.extend(['--write-info-json', '--no-playlist' if 'playlist' not in url else ''])
         cmd = [x for x in cmd if x]  # Remover strings vacíos
         
         cmd.append(url)
@@ -524,13 +550,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Intentar descarga con estrategias adaptadas al entorno y tipo de error
         success = False
         attempt = 1
-        # Permitir intento adicional super agresivo (7) controlado por variable
-        enable_final_aggressive = os.environ.get('AGGRESSIVE_FINAL_ATTEMPT', '1') == '1'
-        # Ajustar max_attempts para incluir android / ios si pack completo
-        extra_clients = 2  # android + ios
-        base_remote = 6 if is_remote_server else 4
-        max_attempts = base_remote + (1 if enable_final_aggressive else 0) + (extra_clients if enable_final_aggressive else 0)
-        max_attempts = min(max_attempts, 9)
+        if fast_mode:
+            max_attempts = 2  # rápido: intento principal + 1 reintento
+        else:
+            enable_final_aggressive = os.environ.get('AGGRESSIVE_FINAL_ATTEMPT', '1') == '1'
+            extra_clients = 2  # android + ios
+            base_remote = 6 if is_remote_server else 4
+            max_attempts = base_remote + (1 if enable_final_aggressive else 0) + (extra_clients if enable_final_aggressive else 0)
+            max_attempts = min(max_attempts, 9)
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         
         # Preparar proxies si definidos
@@ -540,7 +567,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         if proxies:
             DOWNLOADS_STATUS[job_id]['proxies_enabled'] = len(proxies)
         while not success and attempt <= max_attempts:
-            DOWNLOADS_STATUS[job_id]['attempt'] = f'{attempt}/{max_attempts}'
+            DOWNLOADS_STATUS[job_id]['attempt'] = attempt
             # Si hay escalada pendiente y aún no hemos añadido cookies reales
             if attempt > 1 and pending_cookie_escalation and not cookies_added:
                 # Escalar: usar uploaded/env/file en este punto si disponibles
@@ -584,19 +611,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 
                 if is_remote_server:
                     retry_options = [
-                        '--no-check-certificate',
-                        '--user-agent', new_ua,
-                        '--referer', 'https://www.youtube.com/',
-                        '--sleep-interval', str(min_sleep),
-                        '--max-sleep-interval', str(max_sleep),
-                        '--no-warnings',
-                        '--ignore-errors',
-                        '--socket-timeout', '120',
-                        '--fragment-retries', '30',
-                        '--retries', '30',
-                        '--geo-bypass',
-                        '--geo-bypass-country', 'US'
+                        '--no-check-certificate','--user-agent', new_ua,'--referer','https://www.youtube.com/',
+                        '--no-warnings','--ignore-errors','--socket-timeout','120','--fragment-retries','30','--retries','30','--geo-bypass','--geo-bypass-country','US'
                     ]
+                    if not fast_mode:
+                        retry_options.extend(['--sleep-interval', str(min_sleep), '--max-sleep-interval', str(max_sleep)])
 
                     # Estrategias específicas por intento para servidores (diferenciando Shorts)
                     if is_shorts:
@@ -822,13 +841,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd_retry = [x for x in cmd_retry if x]
                 cmd_retry.append(url)
                 
-                # Delay progresivo antes del reintento
-                delay = random.randint(3 + attempt, 8 + (attempt * 2))
-                # Si seguimos con bot_verification continuo y sin cookies reales, aumentar delay
-                if DOWNLOADS_STATUS[job_id].get('error_type') == 'bot_verification' and not cookies_added and attempt >= 3:
-                    delay += 5
-                DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
-                time.sleep(delay)
+                if not fast_mode:
+                    delay = random.randint(3 + attempt, 8 + (attempt * 2))
+                    if DOWNLOADS_STATUS[job_id].get('error_type') == 'bot_verification' and not cookies_added and attempt >= 3:
+                        delay += 5
+                    DOWNLOADS_STATUS[job_id]['status'] = f'esperando {delay}s antes del intento {attempt}'
+                    time.sleep(delay)
+                else:
+                    DOWNLOADS_STATUS[job_id]['status'] = f'reintentando rápido {attempt}'
                 
                 cmd = cmd_retry
                 DOWNLOADS_STATUS[job_id]['command'] = ' '.join(cmd)
@@ -966,17 +986,18 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             })
             
     except Exception as e:
-        DOWNLOADS_STATUS[job_id].update({
-            'status': 'error',
-            'error': str(e)
-        })
-    finally:
-        # Limpiar archivo temporal de cookies si se creó
-        if 'temp_cookies_path' in locals() and temp_cookies_path:
-            try:
-                os.unlink(temp_cookies_path)
-            except:
-                pass
+            DOWNLOADS_STATUS[job_id].update({
+                'status': 'error',
+                'error': stderr,
+                'stdout': stdout,
+                'attempts_used': attempt-1,
+                'error_analysis': {
+                    'bot_check': error_is_bot_check,
+                    'rate_limit': error_is_429,
+                    'general_block': error_is_general_block,
+                    'other_error': not (error_is_bot_check or error_is_429 or error_is_general_block)
+                }
+            })
 
 @app.route('/environment', methods=['GET'])
 def get_environment_info():
@@ -1038,18 +1059,41 @@ def upload_cookies():
     global UPLOADED_COOKIES_PATH
     try:
         data = request.get_json(force=True)
-        cookies_text = data.get('cookies_text','').strip()
+        raw_text = data.get('cookies_text','')
+        cookies_text = raw_text.strip()
         if not cookies_text:
             return jsonify({'error':'cookies_text vacío'}), 400
-        # Validación mínima: debe contener al menos .youtube.com y PREF/CONSENT o ytc
         if '.youtube.com' not in cookies_text:
             return jsonify({'error':'Contenido no parece contener cookies de youtube'}), 400
+        # Sanitizar: agregar cabecera Netscape si falta
+        header = '# Netscape HTTP Cookie File'
+        lines = cookies_text.splitlines()
+        if lines and not lines[0].startswith('# Netscape'):
+            lines.insert(0, header)
+        # Normalizar separadores: permitir espacios múltiples -> tabs simples
+        norm_lines = []
+        for ln in lines:
+            if not ln.strip() or ln.strip().startswith('#'):
+                norm_lines.append(ln)
+                continue
+            # Si la línea ya contiene tabs suficientes, dejarla
+            if '\t' in ln:
+                norm_lines.append(ln)
+                continue
+            # Convertir bloques de espacios a tabs (mínimo 6 columnas requerido por formato Netscape)
+            parts = [p for p in ln.split(' ') if p!='']
+            if len(parts) >= 7:
+                norm_lines.append('\t'.join(parts))
+            else:
+                # Dejar la línea original por seguridad
+                norm_lines.append(ln)
+        final_text = '\n'.join(norm_lines).strip() + '\n'
         import tempfile
         tf = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-        tf.write(cookies_text)
+        tf.write(final_text)
         tf.flush(); tf.close()
         UPLOADED_COOKIES_PATH = tf.name
-        return jsonify({'status':'ok','path':UPLOADED_COOKIES_PATH,'size':len(cookies_text)})
+        return jsonify({'status':'ok','path':UPLOADED_COOKIES_PATH,'size':len(final_text),'added_header': header in final_text,'normalized': True})
     except Exception as e:
         return jsonify({'error':str(e)}), 500
 
