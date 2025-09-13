@@ -104,6 +104,8 @@ Reducción de salida / rapidez:
 | `DOWNLOAD_ARCHIVE` | 0/1 | Usa `.downloaded.txt` para saltar ya procesados |
 | `AUTO_WIPE_DIR` | 0/1 | Limpia automáticamente archivos generados tras servirlos (cuando ya no quedan) |
 | `REMOVE_EMPTY_DIR` | 0/1 | Si la carpeta queda vacía tras wipe la elimina |
+| `PRE_CLEAN_OUTPUT` | 0/1 | Borra TODO el contenido de la carpeta destino antes de iniciar un job (precaución) |
+| `POST_CLEAN_OUTPUT` | 0/1 | Borra los archivos descargados inmediatamente tras completar (no disponibles para frontend) |
 
 Prefetch (metadata rápida) - para acelerar inicio y evitar timeouts en playlists grandes:
 | Variable | Valores | Descripción |
@@ -127,6 +129,14 @@ Descargas rápidas de playlist limitada a 10 elementos, sin metadata extra y evi
 export REDUCE_OUTPUT=1
 export PLAYLIST_LIMIT=10
 export DOWNLOAD_ARCHIVE=1
+export PRE_CLEAN_OUTPUT=1   # Borra antes el contenido del directorio destino
+python3 api_downloader.py
+```
+
+Descargar y luego eliminar automáticamente los archivos (solo flujo de streaming directo):
+```bash
+export POST_CLEAN_OUTPUT=1
+export REMOVE_EMPTY_DIR=1
 python3 api_downloader.py
 ```
 

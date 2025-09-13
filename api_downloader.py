@@ -268,6 +268,47 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
     try:
         # Actualizar estado
         DOWNLOADS_STATUS[job_id]['status'] = 'descargando'
+
+        # Limpieza previa opcional de la carpeta destino (antes de snapshot) si PRE_CLEAN_OUTPUT=1
+        # Seguridad: solo procede si el directorio existe, es realmente un directorio y no es raíz ni home.
+        pre_clean_flag = os.environ.get('PRE_CLEAN_OUTPUT','0') == '1'
+        if pre_clean_flag:
+            safe = True
+            dangerous_roots = {'/', os.path.expanduser('~'), '/home', '/root'}
+            norm_out = os.path.abspath(output_dir)
+            try:
+                if norm_out in dangerous_roots:
+                    safe = False
+                # Evitar borrar si la ruta es muy corta (heurística defensiva)
+                if len(norm_out) < 5:
+                    safe = False
+                if safe and os.path.isdir(norm_out):
+                    # Contar archivos antes
+                    try:
+                        before_listing = os.listdir(norm_out)
+                    except Exception:
+                        before_listing = []
+                    removed_count = 0
+                    for entry in before_listing:
+                        fp = os.path.join(norm_out, entry)
+                        try:
+                            if os.path.isfile(fp) or os.path.islink(fp):
+                                os.remove(fp)
+                                removed_count += 1
+                            elif os.path.isdir(fp):
+                                import shutil
+                                shutil.rmtree(fp, ignore_errors=True)
+                                removed_count += 1
+                        except Exception:
+                            pass
+                    DOWNLOADS_STATUS[job_id]['pre_clean'] = True
+                    DOWNLOADS_STATUS[job_id]['pre_clean_removed'] = removed_count
+                else:
+                    DOWNLOADS_STATUS[job_id]['pre_clean'] = False
+                    if not safe:
+                        DOWNLOADS_STATUS[job_id]['pre_clean_warning'] = 'Ruta no segura para limpieza automática'
+            except Exception as e:
+                DOWNLOADS_STATUS[job_id]['pre_clean_error'] = str(e)
         
         # Construir comando yt-dlp con opciones anti-429
         cmd = ['python3', '-m', 'yt_dlp']
@@ -1120,6 +1161,52 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 'stdout': stdout,
                 'attempts_used': attempt - 1
             })
+
+            # Post-clean automático si se solicita (POST_CLEAN_OUTPUT=1)
+            try:
+                if os.environ.get('POST_CLEAN_OUTPUT','0') == '1':
+                    removed = []
+                    for fp in list(downloaded_files):
+                        try:
+                            if os.path.isfile(fp):
+                                os.remove(fp)
+                                removed.append(os.path.basename(fp))
+                        except Exception:
+                            pass
+                    DOWNLOADS_STATUS[job_id]['post_clean'] = True
+                    DOWNLOADS_STATUS[job_id]['post_clean_removed'] = len(removed)
+                    # Si además REMOVE_EMPTY_DIR=1 y directorio quedó vacío, eliminarlo
+                    resolved_dir = DOWNLOADS_STATUS[job_id].get('resolved_output_dir', output_dir)
+                    if os.environ.get('REMOVE_EMPTY_DIR','0') == '1':
+                        try:
+                            if resolved_dir and os.path.isdir(resolved_dir) and len(os.listdir(resolved_dir)) == 0:
+                                os.rmdir(resolved_dir)
+                                DOWNLOADS_STATUS[job_id]['dir_removed'] = True
+                        except Exception:
+                            pass
+                    # Vaciar lista ya que fueron borrados
+                    DOWNLOADS_STATUS[job_id]['files'] = []
+                else:
+                    # Si no hay post clean global, podemos limpiar selectivamente los .info.json salvo que se pida conservarlos
+                    keep_info = os.environ.get('KEEP_INFO_JSON','0') == '1'
+                    if not keep_info:
+                        info_removed = 0
+                        remaining_files = []
+                        for fp in downloaded_files:
+                            if fp.lower().endswith('.info.json'):
+                                try:
+                                    if os.path.isfile(fp):
+                                        os.remove(fp)
+                                        info_removed += 1
+                                except Exception:
+                                    pass
+                            else:
+                                remaining_files.append(fp)
+                        if info_removed:
+                            DOWNLOADS_STATUS[job_id]['info_json_purged'] = info_removed
+                            DOWNLOADS_STATUS[job_id]['files'] = remaining_files
+            except Exception as pe:
+                DOWNLOADS_STATUS[job_id]['post_clean_error'] = str(pe)
         else:
             DOWNLOADS_STATUS[job_id].update({
                 'status': 'error',

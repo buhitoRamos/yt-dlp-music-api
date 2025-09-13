@@ -208,7 +208,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = document.getElementById('downloadBtn');
         const cancelBtn = document.getElementById('cancelBtn');
         btn.disabled = true;
-        btn.textContent = '⏳ Descargando...';
+        btn.textContent = '⏳ Cargando archivos...';
         cancelBtn.style.display = 'block';
         
         try {
@@ -258,6 +258,60 @@ document.addEventListener('DOMContentLoaded', function() {
             showStatus('error', `Error al cancelar: ${error.message}`);
         }
     });
+
+    // Botón global guardar todos
+    const saveAllBtn = document.getElementById('saveAllBtn');
+    if (saveAllBtn) {
+        saveAllBtn.addEventListener('click', async () => {
+            if (!lastStatusCache || !lastStatusCache.files || lastStatusCache.files.length === 0) {
+                showTemporaryMessage('No hay archivos');
+                return;
+            }
+            if (!('showDirectoryPicker' in window)) {
+                showTemporaryMessage('Tu navegador no soporta carpeta (usa los botones individuales)');
+                return;
+            }
+            try {
+                saveAllBtn.disabled = true;
+                const original = saveAllBtn.textContent;
+                saveAllBtn.textContent = '⏳ Preparando...';
+                const dirHandle = await window.showDirectoryPicker();
+                const delToggle = document.getElementById('deleteAfterDownload');
+                const deleteFlag = delToggle && delToggle.checked;
+                const urls = lastStatusCache.download_urls || [];
+                let ok=0, fail=0;
+                for (let i=0;i<urls.length;i++) {
+                    const url = urls[i] + (deleteFlag ? '?delete=1' : '');
+                    const baseServerPath = lastStatusCache.files[i];
+                    const fileName = baseServerPath.split('/').pop();
+                    saveAllBtn.textContent = `⬇️ ${i+1}/${urls.length}`;
+                    try {
+                        const resp = await fetch(url);
+                        if (!resp.ok) throw new Error(resp.status);
+                        const blob = await resp.blob();
+                        const fh = await dirHandle.getFileHandle(fileName, {create:true});
+                        const w = await fh.createWritable();
+                        await w.write(blob); await w.close();
+                        ok++;
+                    } catch(e) {
+                        console.warn('Falló', fileName, e);
+                        fail++;
+                    }
+                }
+                saveAllBtn.textContent = `✅ ${ok} guardados${fail? ' | '+fail+' errores':''}`;
+                if (deleteFlag && fail===0) {
+                    // Atenuar botones individuales ya que se borraron
+                    const list = document.getElementById('filesList');
+                    if (list) Array.from(list.querySelectorAll('button')).forEach(b=>{ b.disabled=true; b.style.opacity='0.4'; });
+                }
+            } catch(err) {
+                console.warn(err);
+                saveAllBtn.textContent = '❌ Error';
+                setTimeout(()=>{ saveAllBtn.disabled=false; saveAllBtn.textContent='💾 Guardar todos en carpeta...'; }, 2000);
+                return;
+            }
+        });
+    }
 });
 
 // Toggle de calidad según formato
@@ -300,9 +354,9 @@ function updateStatusDisplay(status) {
             if (status.files && status.files.length > 0) {
                 showFiles(status.files);
             }
-            // Mostrar módulo de carpeta ahora
+            // Ya no mostramos el selector de carpeta: usamos enlaces directos de descarga
             const chooser = document.getElementById('folderChooserWrapper');
-            if (chooser) chooser.style.display = 'block';
+            if (chooser) chooser.style.display = 'none';
             if (status.stdout) {
                 showLog(status.stdout);
             }
@@ -489,15 +543,72 @@ function setProgress(percent) {
 function showFiles(files) {
     const container = document.getElementById('filesContainer');
     const list = document.getElementById('filesList');
-    
     list.innerHTML = '';
-    files.forEach(file => {
-        const item = document.createElement('div');
-        item.className = 'file-item';
-        item.textContent = file.split('/').pop(); // Solo el nombre del archivo
-        list.appendChild(item);
+    const urls = (lastStatusCache && lastStatusCache.download_urls) ? lastStatusCache.download_urls : [];
+    files.forEach((file, idx) => {
+        const fileName = file.split('/').pop();
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '10px';
+        row.style.marginBottom = '6px';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = fileName;
+        nameSpan.style.flex = '1 1 auto';
+        nameSpan.style.fontSize = '0.8rem';
+        nameSpan.style.wordBreak = 'break-all';
+
+        const btn = document.createElement('button');
+        btn.textContent = '⬇️ Descargar';
+        btn.className = 'mini-btn';
+        btn.style.background = '#0a5b9e';
+        btn.style.color = '#fff';
+        btn.disabled = !urls[idx];
+
+        btn.addEventListener('click', async () => {
+            if (!urls[idx]) return;
+            const delToggle = document.getElementById('deleteAfterDownload');
+            const deleteFlag = delToggle && delToggle.checked;
+            const finalUrl = urls[idx] + (deleteFlag ? '?delete=1' : '');
+            try {
+                btn.disabled = true;
+                const originalText = btn.textContent;
+                btn.textContent = '⏳';
+                // Usamos fetch para obtener blob y forzar diálogo de descarga manual
+                const resp = await fetch(finalUrl);
+                if (!resp.ok) throw new Error('HTTP '+resp.status);
+                const blob = await resp.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(()=>{
+                    URL.revokeObjectURL(a.href);
+                    a.remove();
+                }, 4000);
+                btn.textContent = '✅';
+                btn.style.background = '#2e7d32';
+                if (deleteFlag) {
+                    // Si se pidió borrar, podríamos remover el row tras unos segundos
+                    setTimeout(()=>{ row.style.opacity='0.4'; }, 1500);
+                } else {
+                    // Permitir otra descarga si no se borró
+                    setTimeout(()=>{ btn.disabled=false; btn.textContent=originalText; }, 1500);
+                }
+            } catch(err) {
+                console.warn('Error descargando', err);
+                btn.textContent = '❌';
+                btn.style.background = '#b00020';
+                setTimeout(()=>{ btn.disabled=false; btn.textContent='Reintentar'; }, 1800);
+            }
+        });
+
+        row.appendChild(nameSpan);
+        row.appendChild(btn);
+        list.appendChild(row);
     });
-    
     container.style.display = 'block';
 }
 

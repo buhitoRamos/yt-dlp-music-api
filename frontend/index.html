@@ -114,7 +114,11 @@
                 <div id="strategyInfo" style="margin-top:6px; font-size:0.75rem; color:#444; display:none;"></div>
                 
                 <div id="filesContainer" class="files-list" style="display:none;">
-                    <strong>✅ Archivo listo:</strong>
+                    <strong>✅ Archivos listos (clic para descargar):</strong>
+                    <div style="margin:6px 0 10px; font-size:0.7rem; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <span style="color:#666;">Puedes desmarcar para conservar los archivos.</span>
+                        <button type="button" id="saveAllBtn" class="mini-btn" style="background:#4b4b9e; color:#fff;">💾 Guardar todos en carpeta...</button>
+                    </div>
                     <div id="filesList"></div>
                 </div>
                 
