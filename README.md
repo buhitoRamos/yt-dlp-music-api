@@ -13,9 +13,10 @@ Una API web moderna para descargar música de YouTube y YouTube Music con interf
 - 🛡️ **Sistema Anti-Bloqueo Inteligente**: Detecta automáticamente el entorno y aplica estrategias específicas
 - ❌ **Cancelación en Tiempo Real**: Botón para cancelar descargas en progreso
 - 📁 **Selector de Carpetas**: Integración con File System Access API
-- 📊 **Monitoreo de Progreso**: Status en tiempo real de las descargas
+- 📊 **Monitoreo de Progreso**: Status de las descargas (polling adaptativo)
 - 🧪 **Métricas en Vivo**: Endpoint `/metrics` con contadores globales y por estado
-- 🎵 **Múltiples Formatos**: MP3, MP4, y mejor calidad disponible
+- 🎵 **Múltiples Formatos**: MP3, MP4, y ahora **bestaudio (sin convertir, más rápido)**
+- ⚡ **SPEED_MODE**: Modo turbo que evita transcodificar a MP3, desactiva prefetch y validaciones extra, y fuerza la mejor pista de audio directamente
 - 🎨 **Diseño Responsive**: Compatible con móviles y escritorio
 - 🌐 **Optimizado para Hosting**: Funciona automáticamente en Render, Heroku, Railway
 
@@ -106,6 +107,7 @@ Reducción de salida / rapidez:
 | `REMOVE_EMPTY_DIR` | 0/1 | Si la carpeta queda vacía tras wipe la elimina |
 | `PRE_CLEAN_OUTPUT` | 0/1 | Borra TODO el contenido de la carpeta destino antes de iniciar un job (precaución) |
 | `POST_CLEAN_OUTPUT` | 0/1 | Borra los archivos descargados inmediatamente tras completar (no disponibles para frontend) |
+| `SPEED_MODE` | 0/1 | Fuerza modo ultra rápido: desactiva prefetch, `HEAD_VALIDATE`, `JITTER_THROTTLE`, limita a 2 intentos y si el usuario pidió MP3 lo sustituye por `bestaudio` (evita transcodificar) |
 
 Prefetch (metadata rápida) - para acelerar inicio y evitar timeouts en playlists grandes:
 | Variable | Valores | Descripción |
@@ -122,6 +124,32 @@ Otros:
 | `HEAD_VALIDATE` | 0/1 | HEAD parcial previo a descarga para cambiar client si falla |
 | `JITTER_THROTTLE` | 0/1 | Aplica jitter a parámetros K para simular variabilidad |
 
+### 🔊 Formato `bestaudio` y SPEED_MODE
+
+Cuando seleccionas en el frontend la opción "Audio rápido (sin convertir)" se solicita directamente la mejor pista de audio disponible (normalmente opus/webm) sin pasar por una transcodificación a MP3. Esto reduce:
+
+- Tiempo de CPU (no se ejecuta ffmpeg para convertir)
+- Latencia total percibida
+- Tamaño temporal de archivos intermedios
+
+Si además exportas `SPEED_MODE=1`:
+
+- Se fuerza `bestaudio` incluso si el usuario eligió MP3 (para máxima velocidad)
+- `PREFETCH_MODE` se pone internamente en `off`
+- Se desactivan `HEAD_VALIDATE` y `JITTER_THROTTLE`
+- Reintentos máximos: 2 (rápido failover)
+- Menos argumentos accesorio → menor riesgo de bloqueos o latencias artificiales
+
+Ejemplo de uso del modo más rápido:
+```bash
+export SPEED_MODE=1
+export REDUCE_OUTPUT=1          # Opcional: menos archivos auxiliares
+export PRE_CLEAN_OUTPUT=1       # Limpia antes la carpeta si quieres un directorio limpio
+python3 api_downloader.py
+```
+
+En este modo, si necesitas MP3 específicamente (por compatibilidad) puedes descargar `bestaudio` y luego convertir localmente donde tengas más CPU/RAM disponibles.
+
 ### Ejemplos rápidos
 
 Descargas rápidas de playlist limitada a 10 elementos, sin metadata extra y evitando duplicados:
@@ -130,6 +158,13 @@ export REDUCE_OUTPUT=1
 export PLAYLIST_LIMIT=10
 export DOWNLOAD_ARCHIVE=1
 export PRE_CLEAN_OUTPUT=1   # Borra antes el contenido del directorio destino
+python3 api_downloader.py
+```
+
+Modo turbo (máxima velocidad, mejor audio directo sin conversión):
+```bash
+export SPEED_MODE=1
+export REDUCE_OUTPUT=1
 python3 api_downloader.py
 ```
 

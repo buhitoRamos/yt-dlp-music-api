@@ -324,6 +324,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         except Exception:
             DOWNLOADS_STATUS[job_id]['initial_snapshot'] = []
 
+        # SPEED_MODE: modo rápido (menos latencia, sin transcode mp3)
+        speed_mode = os.environ.get('SPEED_MODE','0') == '1'
+        if speed_mode:
+            DOWNLOADS_STATUS[job_id]['speed_mode'] = True
+            # En speed mode siempre desactivar prefetch y validaciones que añaden latencia
+            os_prefetch_override = True
+        else:
+            os_prefetch_override = False
         # Flags de características avanzadas (pack completo)
         # Prefetch control:
         # New environment variables:
@@ -335,6 +343,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         #                para un solo video hace modo 'fast'
         #   PREFETCH_TIMEOUT: seg para timeout (-m yt_dlp --dump-json) (default 12 single, 18 legacy if not set)
         prefetch_mode = os.environ.get('PREFETCH_MODE', 'auto').lower().strip()
+        if speed_mode:
+            prefetch_mode = 'off'
         raw_prefetch_timeout = os.environ.get('PREFETCH_TIMEOUT')
         # Heurística playlist (query param list= o /playlist?)
         is_playlist = ('list=' in url) or ('/playlist?' in url)
@@ -374,6 +384,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         mobile_first = os.environ.get('USE_MOBILE_FIRST', '1') == '1'
         head_validate = os.environ.get('HEAD_VALIDATE', '1') == '1'
         jitter_enabled = os.environ.get('JITTER_THROTTLE', '1') == '1'
+        if speed_mode:
+            head_validate = False
+            jitter_enabled = False
 
         DOWNLOADS_STATUS[job_id]['advanced_pack'] = True
         DOWNLOADS_STATUS[job_id]['jitter'] = jitter_enabled
@@ -581,9 +594,17 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['fast_mode_reason'] = 'strong_cookies_remote'
         DOWNLOADS_STATUS[job_id]['cookies_strength'] = cookies_strength
 
-        # Formato/naming
-        if format_type == 'mp3':
-            cmd += ['-x','--audio-format','mp3','--audio-quality', quality]
+        # Formato/naming (agrega bestaudio). En SPEED_MODE mp3 => bestaudio
+        original_request_format = format_type
+        if format_type == 'bestaudio':
+            cmd.extend(['-f','bestaudio'])
+        elif format_type == 'mp3':
+            if speed_mode:
+                format_type = 'bestaudio'
+                DOWNLOADS_STATUS[job_id]['speed_mode_format_override'] = 'bestaudio'
+                cmd.extend(['-f','bestaudio'])
+            else:
+                cmd += ['-x','--audio-format','mp3','--audio-quality', quality]
         elif format_type == 'mp4':
             cmd.extend(['-f', 'best'])
         else:
@@ -638,7 +659,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Modo estricto 2 intentos configurable (por defecto ON). Fallback adaptativo opcional.
         strict_two_attempts = os.environ.get('STRICT_TWO_ATTEMPTS','1') == '1'
         allow_fallback = os.environ.get('ALLOW_FALLBACK','1') == '1'
-        max_attempts = 2 if strict_two_attempts else (6 if is_remote_server else 4)
+        if speed_mode:
+            strict_two_attempts = True
+            max_attempts = 2
+        else:
+            max_attempts = 2 if strict_two_attempts else (6 if is_remote_server else 4)
         DOWNLOADS_STATUS[job_id]['max_attempts'] = max_attempts
         DOWNLOADS_STATUS[job_id]['strict_two_attempts'] = strict_two_attempts
         DOWNLOADS_STATUS[job_id]['allow_fallback'] = allow_fallback
