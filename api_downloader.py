@@ -9,6 +9,7 @@ import threading
 import time
 import random
 from datetime import datetime
+import re
 
 # Configuración
 DEFAULT_OUTPUT_DIR = "/Users/O002545/Music/playlist"
@@ -213,6 +214,7 @@ def download():
         cookies_file = data.get('cookies_file')  # Archivo de cookies opcional
         force_local = str(data.get('force_local', '0')) in ['1', 'true', 'True']
         force_remote = str(data.get('force_remote', '0')) in ['1', 'true', 'True']
+        reuse_existing = str(data.get('reuse_existing', '0')) in ['1','true','True']
         
         # Validar que se especifique output_dir
         if not output_dir_raw:
@@ -251,7 +253,7 @@ def download():
         }
         
         # Ejecutar descarga en hilo separado
-        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file, force_local, force_remote))
+        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, cookies_file, force_local, force_remote, reuse_existing))
         thread.daemon = True
         thread.start()
         
@@ -264,15 +266,64 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None, force_local=False, force_remote=False):
+def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None, force_local=False, force_remote=False, reuse_existing=False):
     try:
         # Actualizar estado
         DOWNLOADS_STATUS[job_id]['status'] = 'descargando'
+
+        def extract_video_id(u: str):
+            try:
+                lu = u.lower()
+                m = re.search(r'[?&]v=([a-z0-9_-]{6,})', lu)
+                if m:
+                    return m.group(1)
+                m = re.search(r'youtu\.be/([a-z0-9_-]{6,})', lu)
+                if m:
+                    return m.group(1)
+                m = re.search(r'/shorts/([a-z0-9_-]{6,})', lu)
+                if m:
+                    return m.group(1)
+            except Exception:
+                pass
+            return None
+
+        video_id = extract_video_id(url)
+        if video_id:
+            DOWNLOADS_STATUS[job_id]['video_id_detected'] = video_id
+
+        # Reusar archivos existentes sin re-descargar si reuse_existing=1
+        if reuse_existing:
+            try:
+                existing = []
+                if os.path.isdir(output_dir):
+                    for fname in os.listdir(output_dir):
+                        if fname.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                            existing.append(os.path.join(output_dir, fname))
+                if existing:
+                    DOWNLOADS_STATUS[job_id].update({
+                        'status': 'completado',
+                        'progress': 100,
+                        'files': existing,
+                        'reused_existing': True,
+                        'reuse_count': len(existing)
+                    })
+                    return
+                else:
+                    DOWNLOADS_STATUS[job_id]['reuse_existing_empty'] = True
+            except Exception as _reuse_e:
+                DOWNLOADS_STATUS[job_id]['reuse_existing_error'] = str(_reuse_e)
 
         # Limpieza previa opcional de la carpeta destino (antes de snapshot) si PRE_CLEAN_OUTPUT=1
         # Seguridad: solo procede si el directorio existe, es realmente un directorio y no es raíz ni home.
         pre_clean_flag = os.environ.get('PRE_CLEAN_OUTPUT','0') == '1'
         if pre_clean_flag:
+            # Nueva lógica: sólo borrar archivos cuya antigüedad > N horas (default 3)
+            try:
+                min_age_hours = float(os.environ.get('PRE_CLEAN_MIN_AGE_HOURS', '3'))
+            except ValueError:
+                min_age_hours = 3.0
+            min_age_seconds = min_age_hours * 3600.0
+            now_ts = time.time()
             safe = True
             dangerous_roots = {'/', os.path.expanduser('~'), '/home', '/root'}
             norm_out = os.path.abspath(output_dir)
@@ -289,9 +340,19 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     except Exception:
                         before_listing = []
                     removed_count = 0
+                    skipped_count = 0
                     for entry in before_listing:
                         fp = os.path.join(norm_out, entry)
                         try:
+                            # Determinar edad del archivo/directorio (usar mtime)
+                            try:
+                                mtime = os.path.getmtime(fp)
+                                age = now_ts - mtime
+                            except Exception:
+                                age = 0
+                            if age < min_age_seconds:
+                                skipped_count += 1
+                                continue
                             if os.path.isfile(fp) or os.path.islink(fp):
                                 os.remove(fp)
                                 removed_count += 1
@@ -303,6 +364,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             pass
                     DOWNLOADS_STATUS[job_id]['pre_clean'] = True
                     DOWNLOADS_STATUS[job_id]['pre_clean_removed'] = removed_count
+                    DOWNLOADS_STATUS[job_id]['pre_clean_skipped'] = skipped_count
+                    DOWNLOADS_STATUS[job_id]['pre_clean_min_age_h'] = min_age_hours
                 else:
                     DOWNLOADS_STATUS[job_id]['pre_clean'] = False
                     if not safe:
@@ -346,8 +409,16 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         if speed_mode:
             prefetch_mode = 'off'
         raw_prefetch_timeout = os.environ.get('PREFETCH_TIMEOUT')
-        # Heurística playlist (query param list= o /playlist?)
-        is_playlist = ('list=' in url) or ('/playlist?' in url)
+        # Heurística playlist refinada:
+        # - Considerar playlist solo si URL principal es de tipo playlist ( /playlist? ) o NO contiene parámetro v= (es decir, apunta a la vista de playlist completa)
+        # - Un video individual que trae list= como contexto (watch?v=...&list=...) debe tratarse como single video para permitir filtrado de saltado.
+        lowered_url = url.lower()
+        has_list = 'list=' in lowered_url or '/playlist?' in lowered_url
+        has_video_id = ('watch?v=' in lowered_url) or ('youtu.be/' in lowered_url) or ('/shorts/' in lowered_url)
+        if has_list and not has_video_id:
+            is_playlist = True
+        else:
+            is_playlist = False
         # Definir si habilitamos prefetch según modo
         if prefetch_mode not in ('off','fast','full','auto'):
             prefetch_mode = 'auto'
@@ -643,10 +714,277 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd.append('--no-write-playlist-metafiles')
             if not is_playlist:
                 cmd.append('--no-playlist')
-        # Archivo de registro de descargas para saltar ítems ya procesados
-        if os.environ.get('DOWNLOAD_ARCHIVE','0') == '1':
-            archive_path = os.path.join(output_dir, '.downloaded.txt')
-            cmd.extend(['--download-archive', archive_path])
+        # Archivo de registro de descargas para saltar ítems ya procesados (activado por defecto)
+        archive_path = os.path.join(output_dir, '.downloaded.txt')
+        cmd.extend(['--download-archive', archive_path])
+        DOWNLOADS_STATUS[job_id]['download_archive'] = archive_path
+        # Detección temprana: si URL (o video_id) ya fue descargada y está en archivo, marcar y salir rápido
+        try:
+            if os.path.exists(archive_path):
+                with open(archive_path, 'r', encoding='utf-8', errors='ignore') as ar:
+                    lines = ar.readlines()
+                # Normalizar para búsqueda flexible
+                lower_lines = [ln.lower() for ln in lines]
+                already = False
+                if video_id:
+                    vid_low = video_id.lower()
+                    # Formato típico de yt-dlp archive: 'youtube <id>'
+                    if any(vid_low in ln for ln in lower_lines):
+                        already = True
+                if not already:
+                    # Canonicalizar url para comparación (quedarse con parte antes de &si= etc.)
+                    can_url = url.split('&si=')[0].replace('music.youtube.com','www.youtube.com').strip().lower()
+                    if any(can_url in ln for ln in lower_lines):
+                        already = True
+                if already:
+                    # Recolectar archivos existentes compatibles en el directorio (audio/video típicos)
+                    existing_files = []
+                    single_video = not is_playlist  # heurística: url no contiene playlist markers
+                    meta_title = None
+                    meta_artist = None
+                    # video_id ya obtenido antes (variable externa)
+                    # Intentar obtener metadata mínima para filtrar (solo para single video)
+                    if single_video:
+                        try:
+                            meta_cmd = [
+                                'python3','-m','yt_dlp','--dump-json','--skip-download','--no-playlist', url
+                            ]
+                            meta_proc = subprocess.run(meta_cmd, capture_output=True, text=True, timeout=14)
+                            if meta_proc.returncode == 0 and meta_proc.stdout.strip():
+                                first_line = meta_proc.stdout.strip().splitlines()[0]
+                                md = json.loads(first_line)
+                                meta_title = (md.get('title') or '').strip()
+                                meta_artist = (md.get('artist') or md.get('uploader') or '').strip()
+                                DOWNLOADS_STATUS[job_id]['skip_meta'] = True
+                        except Exception as _sm_e:
+                            DOWNLOADS_STATUS[job_id]['skip_meta_error'] = str(_sm_e)
+                    # Construir posibles patrones de nombre según plantilla usada
+                    candidate_patterns = []
+                    if single_video and meta_title:
+                        # naming = artist-title o title
+                        base_title = meta_title
+                        safe_title = base_title.replace('/', '_').replace('\n',' ').replace('\r',' ').strip()
+                        candidate_patterns.append(safe_title.lower())
+                        if meta_artist:
+                            combo = f"{meta_artist} - {base_title}".replace('/', '_').strip().lower()
+                            candidate_patterns.append(combo)
+                        # Normalizaciones adicionales (sin acentos / quitar caracteres especiales básicos)
+                        try:
+                            import unicodedata
+                            def norm_txt(t):
+                                nf = unicodedata.normalize('NFKD', t)
+                                nf = ''.join(c for c in nf if not unicodedata.combining(c))
+                                nf = nf.replace('_',' ').replace('-', ' ').replace('  ',' ').strip().lower()
+                                return nf
+                            norm_title = norm_txt(base_title)
+                            candidate_patterns.append(norm_title)
+                            if meta_artist:
+                                candidate_patterns.append(norm_txt(meta_artist + ' ' + base_title))
+                        except Exception:
+                            pass
+                    if single_video and video_id:
+                        candidate_patterns.append(video_id.lower())
+                        # Variante dentro de paréntesis o entre espacios por si el nombre incluye ID
+                        candidate_patterns.append(f'({video_id.lower()})')
+                    try:
+                        for fname in os.listdir(output_dir):
+                            lower = fname.lower()
+                            if not lower.endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                                continue
+                            fullp = os.path.join(output_dir, fname)
+                            if single_video and candidate_patterns:
+                                # Aceptar si cualquier patrón aparece (startswith o in)
+                                if any(p in lower for p in candidate_patterns):
+                                    existing_files.append(fullp)
+                            else:
+                                existing_files.append(fullp)
+                        # Si filtramos y quedó vacío, fallback a todos
+                        if single_video and candidate_patterns and not existing_files:
+                            for fname in os.listdir(output_dir):
+                                if fname.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                                    existing_files.append(os.path.join(output_dir, fname))
+                                    break  # solo 1 para single
+                        # Si filtrado devolvió más de 1 para single, reducir a mejor candidato
+                        if single_video and len(existing_files) > 1:
+                            scoring_info = []
+                            def token_norm(txt):
+                                import unicodedata
+                                t = unicodedata.normalize('NFKD', txt)
+                                t = ''.join(c for c in t if not unicodedata.combining(c))
+                                t = t.lower()
+                                for ch in ['_', '-', '(', ')', '[', ']', '.', ',', '  ']:
+                                    t = t.replace(ch, ' ')
+                                return [w for w in t.split() if len(w) > 1]
+                            title_tokens = token_norm(meta_title) if meta_title else []
+                            artist_tokens = token_norm(meta_artist) if meta_artist else []
+                            id_tokens = [video_id.lower()] if video_id else []
+                            def score(path):
+                                name = os.path.basename(path).lower()
+                                tokens = token_norm(name)
+                                st = 0
+                                if title_tokens:
+                                    common_t = len(set(tokens) & set(title_tokens))
+                                    st += common_t * 4
+                                if artist_tokens:
+                                    common_a = len(set(tokens) & set(artist_tokens))
+                                    st += common_a * 3
+                                if id_tokens and any(t in name for t in id_tokens):
+                                    st += 8
+                                # longitud de tokens (más largo ligeramente mayor peso)
+                                st += min(len(tokens), 12) * 0.2
+                                try:
+                                    st += os.path.getsize(path) / 400000.0  # cada ~400KB suma 1
+                                except Exception:
+                                    pass
+                                try:
+                                    st += (os.path.getmtime(path) % 1000) / 2000.0
+                                except Exception:
+                                    pass
+                                scoring_info.append({'file': os.path.basename(path), 'score': round(st,2)})
+                                return st
+                            existing_files.sort(key=score, reverse=True)
+                            best = existing_files[0]
+                            existing_files = [best]
+                            DOWNLOADS_STATUS[job_id]['skip_multi_reduced'] = True
+                            DOWNLOADS_STATUS[job_id]['skip_scoring'] = scoring_info
+                        # Si no había patrones (metadata falló) y es single, elegir archivo más reciente solamente
+                        if single_video and not candidate_patterns:
+                            candidates = [p for p in existing_files if p.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4'))]
+                            if len(candidates) > 1:
+                                try:
+                                    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                                    existing_files = [candidates[0]]
+                                    DOWNLOADS_STATUS[job_id]['skip_recent_used'] = True
+                                except Exception:
+                                    existing_files = [candidates[0]]
+                    except Exception as _list_e:
+                        DOWNLOADS_STATUS[job_id]['archive_list_error'] = str(_list_e)
+                    if single_video:
+                        DOWNLOADS_STATUS[job_id]['skip_filtered_single'] = True
+                        # Filtro temprano adicional: si tenemos prefetch_title y video_id intentar match directo
+                        try:
+                            early_title = DOWNLOADS_STATUS[job_id].get('prefetch_title')
+                            if early_title and len(existing_files) > 1:
+                                et_norm = early_title.lower().replace('_',' ').replace('-',' ').strip()
+                                vid_low = (video_id or '').lower()
+                                early_matches = []
+                                for p in existing_files:
+                                    bn = os.path.basename(p).lower()
+                                    bn_norm = bn.replace('_',' ').replace('-',' ').strip()
+                                    if et_norm in bn_norm:
+                                        if (not vid_low) or (vid_low in bn_norm):
+                                            early_matches.append(p)
+                                if len(early_matches) == 1:
+                                    existing_files = [early_matches[0]]
+                                    DOWNLOADS_STATUS[job_id]['skip_early_prefetch_match'] = True
+                                elif len(early_matches) > 1:
+                                    # si varios, priorizar el que contenga video_id
+                                    vid_filtered = [p for p in early_matches if vid_low and vid_low in os.path.basename(p).lower()]
+                                    if len(vid_filtered) == 1:
+                                        existing_files = [vid_filtered[0]]
+                                        DOWNLOADS_STATUS[job_id]['skip_early_prefetch_match'] = True
+                                    else:
+                                        DOWNLOADS_STATUS[job_id]['skip_early_prefetch_ambiguous'] = len(early_matches)
+                        except Exception as _early_e:
+                            DOWNLOADS_STATUS[job_id]['skip_early_prefetch_error'] = str(_early_e)
+                        # Reducción forzada final: si por alguna razón persisten >1 archivos
+                        if len(existing_files) > 1:
+                            try:
+                                # Nuevo: intentar obtener filename exacto usando yt-dlp --get-filename con la misma plantilla
+                                expected_name = None
+                                try:
+                                    # Replicar parte de la lógica de plantilla (naming ya elegido arriba como 'template')
+                                    # Necesitamos recalcular template localmente (duplicamos mini-lógica simplificada)
+                                    if naming == 'title':
+                                        tmpl_probe = '%(title)s.%(ext)s'
+                                    elif naming == 'artist-title':
+                                        tmpl_probe = '%(artist|uploader|Unknown)s - %(title)s.%(ext)s'
+                                    else:
+                                        tmpl_probe = '%(title)s.%(ext)s'
+                                    probe_cmd = [
+                                        'python3','-m','yt_dlp','--no-playlist','--skip-download','--get-filename'
+                                    ]
+                                    # Imitar opciones de conversión para que la extensión esperada coincida (mp3 / bestaudio etc.)
+                                    if format_type == 'mp3':
+                                        probe_cmd += ['-x','--audio-format','mp3']
+                                    elif format_type == 'bestaudio':
+                                        probe_cmd += ['-f','bestaudio']
+                                    elif format_type == 'mp4':
+                                        probe_cmd += ['-f','best']
+                                    probe_cmd += ['-o', tmpl_probe, url]
+                                    probe_proc = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=18)
+                                    if probe_proc.returncode == 0:
+                                        line = probe_proc.stdout.strip().splitlines()[-1].strip()
+                                        if line:
+                                            expected_name = line
+                                            DOWNLOADS_STATUS[job_id]['skip_expected_name'] = expected_name
+                                except Exception as _exp_e:
+                                    DOWNLOADS_STATUS[job_id]['skip_expected_name_error'] = str(_exp_e)
+                                if expected_name:
+                                    exp_lower = expected_name.lower()
+                                    exp_stem, exp_ext = os.path.splitext(exp_lower)
+                                    allowed_exts = ['.mp3','.m4a','.opus','.webm','.mp4']
+                                    # 1) Exacto
+                                    matches = [p for p in existing_files if os.path.basename(p).lower() == exp_lower]
+                                    # 2) Mismo stem distinta extensión (p.e. sondas sin -x devolvieron .webm pero existe .mp3)
+                                    if not matches:
+                                        for p in existing_files:
+                                            bn = os.path.basename(p).lower()
+                                            stem, ext = os.path.splitext(bn)
+                                            if stem == exp_stem and (ext in allowed_exts or exp_ext in allowed_exts):
+                                                matches.append(p)
+                                                break
+                                    # 3) Normalización flexible (espacios/guiones/underscores)
+                                    if not matches:
+                                        def norm_basic(txt):
+                                            return txt.replace('_',' ').replace('-',' ').replace('  ',' ').strip()
+                                        norm_target = norm_basic(exp_stem)
+                                        for p in existing_files:
+                                            bn = os.path.basename(p).lower()
+                                            stem, _ = os.path.splitext(bn)
+                                            if norm_basic(stem) == norm_target:
+                                                matches.append(p)
+                                                break
+                                    if matches:
+                                        existing_files = [matches[0]]
+                                        DOWNLOADS_STATUS[job_id]['skip_expected_match'] = True
+                                    else:
+                                        DOWNLOADS_STATUS[job_id]['skip_expected_match'] = False
+                                prefetch_title2 = DOWNLOADS_STATUS[job_id].get('prefetch_title')
+                                def simple_score(p):
+                                    base = os.path.basename(p).lower()
+                                    sc = 0
+                                    if video_id and video_id.lower() in base:
+                                        sc += 20
+                                    if prefetch_title2 and prefetch_title2.lower() in base:
+                                        sc += 10
+                                    # tokens
+                                    toks = [t for t in base.replace('-',' ').replace('_',' ').split() if len(t)>1]
+                                    if prefetch_title2:
+                                        want = [t for t in prefetch_title2.lower().replace('-',' ').split() if len(t)>1]
+                                        sc += len(set(toks) & set(want)) * 2
+                                    try:
+                                        sc += os.path.getsize(p)/500000.0
+                                    except Exception:
+                                        pass
+                                    return sc
+                                existing_files.sort(key=simple_score, reverse=True)
+                                best = existing_files[0]
+                                existing_files = [best]
+                                DOWNLOADS_STATUS[job_id]['skip_force_reduced'] = True
+                            except Exception as _fr_e:
+                                DOWNLOADS_STATUS[job_id]['skip_force_reduce_error'] = str(_fr_e)
+                    DOWNLOADS_STATUS[job_id].update({
+                        'status': 'saltado',
+                        'skipped_reason': 'ya_descargado_en_archive',
+                        'progress': 100,
+                        'files': existing_files,
+                        'already_downloaded': True,
+                        'provided_cached_files': True
+                    })
+                    return
+        except Exception as _arch_e:
+            DOWNLOADS_STATUS[job_id]['archive_precheck_error'] = str(_arch_e)
         cmd = [x for x in cmd if x]  # Remover strings vacíos
         
         cmd.append(url)
@@ -1165,15 +1503,38 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     try:
                         import re
                         dest_pattern = re.compile(r"Destination: (.+)\n")
+                        # También capturar líneas de 'has already been downloaded'
+                        # Formato real típico: "[download] /ruta/o/nombre.mp3 has already been downloaded"
+                        already_pattern = re.compile(r"^\[download\]\s+(?P<path>.+?\.(?:mp3|m4a|opus|webm|mp4)) has already been downloaded$", re.IGNORECASE | re.MULTILINE)
                         matches = dest_pattern.findall(stdout)
                         for m in matches:
                             m = m.strip()
                             if os.path.exists(m) and m.lower().endswith(('.mp3','.mp4','.webm','.m4a','.opus')):
                                 downloaded_files.append(m)
+                        # Extra: si todavía vacío, intentar con already_pattern
+                        if not downloaded_files:
+                            for m in already_pattern.findall(stdout):
+                                p = m.strip()
+                                if os.path.exists(p) and p not in downloaded_files:
+                                    downloaded_files.append(p)
                         if downloaded_files:
                             DOWNLOADS_STATUS[job_id]['parsed_from_stdout'] = True
                     except Exception as _pe:
                         DOWNLOADS_STATUS[job_id]['parse_stdout_error'] = str(_pe)
+                # Fallback adicional: si NO hay nuevos archivos, ni parseo stdout produjo, reutilizar snapshot inicial
+                if not downloaded_files:
+                    try:
+                        snapshot_candidates = []
+                        for name in initial_files_snapshot:
+                            if name.lower().endswith(('.mp3','.mp4','.webm','.m4a','.opus')):
+                                fullp = os.path.join(resolved_dir, name)
+                                if os.path.exists(fullp):
+                                    snapshot_candidates.append(fullp)
+                        if snapshot_candidates:
+                            downloaded_files = snapshot_candidates
+                            DOWNLOADS_STATUS[job_id]['reused_snapshot_files'] = True
+                    except Exception as _snap_e:
+                        DOWNLOADS_STATUS[job_id]['snapshot_fallback_error'] = str(_snap_e)
             except Exception as e:
                 DOWNLOADS_STATUS[job_id]['file_diff_error'] = str(e)
                 # Fallback a listado completo
@@ -1183,6 +1544,88 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             downloaded_files.append(os.path.join(resolved_dir, file))
                 except Exception:
                     pass
+
+            # --- Nuevo filtrado final para single video ---
+            try:
+                is_playlist_flag = DOWNLOADS_STATUS[job_id].get('is_playlist')
+                vid_id = DOWNLOADS_STATUS[job_id].get('video_id_detected')
+                # Solo aplicar si NO es playlist y tenemos más de un archivo candidate
+                if not is_playlist_flag and len(downloaded_files) > 1:
+                    # Intentar extraer título/artist desde metadata rápida (si no la tenemos ya del prefetch)
+                    meta_title2 = DOWNLOADS_STATUS[job_id].get('prefetch_title')
+                    meta_artist2 = None  # no siempre está disponible; se podría parsear de stdout si quisiéramos
+                    import unicodedata
+                    def norm_txt(t):
+                        if not t: return ''
+                        nf = unicodedata.normalize('NFKD', t)
+                        nf = ''.join(c for c in nf if not unicodedata.combining(c))
+                        nf = nf.lower().replace('_',' ').replace('-', ' ')
+                        return nf
+                    patterns = []
+                    if meta_title2:
+                        patterns.append(norm_txt(meta_title2))
+                    if meta_artist2 and meta_title2:
+                        patterns.append(norm_txt(meta_artist2 + ' ' + meta_title2))
+                    if vid_id:
+                        patterns.append(vid_id.lower())
+                        patterns.append(f'({vid_id.lower()})')
+                    # Scoring similar al usado en rama saltado
+                    def token_norm(txt):
+                        if not txt: return []
+                        import unicodedata as _u
+                        x = _u.normalize('NFKD', txt)
+                        x = ''.join(c for c in x if not _u.combining(c))
+                        for ch in ['_', '-', '(', ')', '[', ']', '.', ',', '  ']:
+                            x = x.replace(ch, ' ')
+                        return [w for w in x.lower().split() if len(w) > 1]
+                    title_tokens = token_norm(meta_title2)
+                    artist_tokens = token_norm(meta_artist2) if meta_artist2 else []
+                    id_tokens = [vid_id.lower()] if vid_id else []
+                    scoring_info2 = []
+                    def score2(path):
+                        name = os.path.basename(path)
+                        low = name.lower()
+                        tokens = token_norm(low)
+                        s = 0
+                        if title_tokens:
+                            s += len(set(tokens) & set(title_tokens)) * 4
+                        if artist_tokens:
+                            s += len(set(tokens) & set(artist_tokens)) * 3
+                        if id_tokens and any(t in low for t in id_tokens):
+                            s += 10
+                        try:
+                            s += os.path.getsize(path)/500000.0
+                        except Exception:
+                            pass
+                        scoring_info2.append({'file': name, 'score': round(s,2)})
+                        return s
+                    # Si tenemos un patrón que coincide claramente con un único archivo, seleccionar directamente
+                    direct_matches = []
+                    if patterns:
+                        for f in downloaded_files:
+                            nlow = os.path.basename(f).lower()
+                            if any(p and p in nlow for p in patterns):
+                                direct_matches.append(f)
+                    chosen = None
+                    if len(direct_matches) == 1:
+                        chosen = direct_matches[0]
+                    elif len(direct_matches) > 1:
+                        direct_matches.sort(key=score2, reverse=True)
+                        chosen = direct_matches[0]
+                    else:
+                        # usar scoring global
+                        downloaded_files.sort(key=score2, reverse=True)
+                        chosen = downloaded_files[0]
+                    if chosen:
+                        if chosen not in downloaded_files:
+                            downloaded_files.append(chosen)
+                        # Reducir a uno
+                        if len(downloaded_files) > 1:
+                            downloaded_files = [chosen]
+                            DOWNLOADS_STATUS[job_id]['single_completion_reduced'] = True
+                            DOWNLOADS_STATUS[job_id]['single_completion_scoring'] = scoring_info2
+            except Exception as _single_final_e:
+                DOWNLOADS_STATUS[job_id]['single_completion_filter_error'] = str(_single_final_e)
 
             # Guardar cliente exitoso en caché si posible
             if enable_cache:
@@ -1334,6 +1777,22 @@ def get_status(job_id):
     status = DOWNLOADS_STATUS[job_id].copy()
     if 'process' in status:
         del status['process']
+    # Fallback: si no hay files pero el job terminó (saltado/completado) y tenemos un directorio, intentar re-listar
+    if not status.get('files') and status.get('status') in ('completado','saltado'):
+        resolved_dir = status.get('resolved_output_dir') or status.get('requested_output_dir')
+        try:
+            if resolved_dir and os.path.isdir(resolved_dir):
+                relisted = []
+                for fname in os.listdir(resolved_dir):
+                    if fname.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                        relisted.append(os.path.join(resolved_dir, fname))
+                # Evitar sobrescribir si estaba vacío porque se limpiaron realmente todos
+                if relisted:
+                    DOWNLOADS_STATUS[job_id]['files'] = relisted
+                    status['files'] = relisted
+                    status['files_relisted'] = True
+        except Exception as _relist_e:
+            status['relist_error'] = str(_relist_e)
     # Incluir URLs de descarga si se han generado archivos
     files = status.get('files') or []
     if files:
@@ -1344,6 +1803,20 @@ def get_status(job_id):
         status['cleanup_available'] = True
     else:
         status['cleanup_available'] = False
+        # Diagnóstico si terminó pero no hay archivos
+        if status.get('status') in ('completado','saltado'):
+            reasons = []
+            if status.get('post_clean'):
+                reasons.append('post_clean_enabled')
+            if os.environ.get('POST_CLEAN_OUTPUT','0') == '1':
+                reasons.append('env_POST_CLEAN_OUTPUT=1')
+            if os.environ.get('AUTO_WIPE_DIR','0') == '1':
+                reasons.append('env_AUTO_WIPE_DIR=1')
+            if status.get('already_downloaded') and not status.get('files'):
+                reasons.append('archive_marked_but_files_missing')
+            if not reasons:
+                reasons.append('unknown_empty_final')
+            status['debug_no_files_reason'] = reasons
     
     # Contador de polls a nivel global y por job
     GLOBAL_METRICS['status_requests'] += 1
@@ -1502,6 +1975,51 @@ def delete_single_file(job_id, index):
         return jsonify({'status':'ok','deleted':os.path.basename(path),'remaining':len(remaining)})
     except Exception as e:
         return jsonify({'error':'No se pudo borrar','detalle':str(e)}), 500
+
+@app.route('/job-files/<job_id>', methods=['GET'])
+def job_files(job_id):
+    """Devuelve siempre un listado fresco de archivos existentes en disco para el job,
+    generando también URLs de descarga, incluso si el estado original tenía files vacío."""
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    job = DOWNLOADS_STATUS[job_id]
+    resolved_dir = job.get('resolved_output_dir') or job.get('requested_output_dir')
+    if not resolved_dir or not os.path.isdir(resolved_dir):
+        return jsonify({'error':'Directorio no disponible'}), 400
+    try:
+        fresh = []
+        for fname in os.listdir(resolved_dir):
+            if fname.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                fresh.append(os.path.join(resolved_dir, fname))
+        job['files'] = fresh
+        urls = [f"/file/{job_id}/{i}" for i,_ in enumerate(fresh)]
+        return jsonify({'status':'ok','files':fresh,'download_urls':urls,'count':len(fresh)})
+    except Exception as e:
+        return jsonify({'error':'Listado falló','detalle':str(e)}), 500
+
+@app.route('/regen-files/<job_id>', methods=['POST'])
+def regenerate_files(job_id):
+    """Regenera la lista de archivos para un job ya completado/saltado cuando el frontend no recibió download_urls.
+    Útil si se limpió la memoria del navegador o falló el polling final. No re-descarga nada, solo re-lista el directorio."""
+    if job_id not in DOWNLOADS_STATUS:
+        return jsonify({'error':'Job ID no encontrado'}), 404
+    job = DOWNLOADS_STATUS[job_id]
+    if job.get('status') not in ('completado','saltado'):
+        return jsonify({'error':'Job aún en progreso o con error','status':job.get('status')}), 400
+    resolved_dir = job.get('resolved_output_dir') or job.get('requested_output_dir')
+    if not resolved_dir or not os.path.isdir(resolved_dir):
+        return jsonify({'error':'Directorio no disponible'}), 400
+    try:
+        new_list = []
+        for fname in os.listdir(resolved_dir):
+            if fname.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4')):
+                new_list.append(os.path.join(resolved_dir, fname))
+        if not new_list:
+            return jsonify({'warning':'No se encontraron archivos de audio/video'}), 200
+        job['files'] = new_list
+        return jsonify({'status':'ok','files':new_list,'count':len(new_list)})
+    except Exception as e:
+        return jsonify({'error':'Fallo re-listado','detalle':str(e)}), 500
 
 @app.route('/upload-cookies', methods=['POST'])
 def upload_cookies():

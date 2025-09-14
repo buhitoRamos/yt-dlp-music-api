@@ -271,6 +271,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 showTemporaryMessage('Tu navegador no soporta carpeta (usa los botones individuales)');
                 return;
             }
+            if (!lastStatusCache.download_urls || lastStatusCache.download_urls.length === 0) {
+                // Intentar recuperación rápida antes de salir
+                await attemptRegenLinks(lastStatusCache);
+                if (!lastStatusCache.download_urls || lastStatusCache.download_urls.length === 0) {
+                    showTemporaryMessage('Recuperando enlaces... reintenta en 1s');
+                    setTimeout(()=>{ tryRefreshSaveAll(); }, 1200);
+                    return;
+                }
+            }
             try {
                 saveAllBtn.disabled = true;
                 const original = saveAllBtn.textContent;
@@ -345,7 +354,11 @@ function updateStatusDisplay(status) {
         
         case 'descargando':
             showStatus('loading', 'Descargando archivos...');
-            setProgress(50);
+            setProgress(Math.min(50, status.progress || 50));
+            // Si ya hay archivos detectados (porque estaban en cache / ya descargados) mostrarlos de inmediato
+            if (status.files && status.files.length > 0 && !document.getElementById('filesContainer').style.display.includes('block')) {
+                showFiles(status.files);
+            }
             break;
         
         case 'completado':
@@ -357,12 +370,29 @@ function updateStatusDisplay(status) {
             } else if (status.download_urls && status.download_urls.length > 0) {
                 const synthetic = status.download_urls.map((u,i)=>`archivo_${i+1}`);
                 showFiles(synthetic);
+            } else {
+                // Fallback: intentar regenerar lista si terminó pero no tenemos nada
+                attemptRegenLinks(status);
             }
             // Ya no mostramos el selector de carpeta: usamos enlaces directos de descarga
             const chooser = document.getElementById('folderChooserWrapper');
             if (chooser) chooser.style.display = 'none';
             if (status.stdout) {
                 showLog(status.stdout);
+            }
+            break;
+        case 'saltado':
+            // Estado cuando se evitó re-descargar porque ya existía en archive o reuse_existing
+            showStatus('info', '⚠️ Ya estaba descargado (saltado)');
+            setProgress(100);
+            if (status.files && status.files.length > 0) {
+                showFiles(status.files);
+            } else if (status.download_urls && status.download_urls.length > 0) {
+                const synthetic2 = status.download_urls.map((u,i)=>`archivo_${i+1}`);
+                showFiles(synthetic2);
+            } else {
+                // Intentar fallback inmediato para forzar aparición módulo archivos
+                attemptRegenLinks(status, true);
             }
             break;
         
@@ -430,6 +460,68 @@ function updateStatusDisplay(status) {
             box.innerHTML = lines.map(l=>`<div class="line">${l}</div>`).join('');
         }
     } catch(e){ /* noop */ }
+}
+
+// Intentar regenerar enlaces/archivos desde backend si el frontend no recibió download_urls
+async function attemptRegenLinks(status, showMsg=false){
+    try {
+        if (!currentJobId) return;
+        if (showMsg) showTemporaryMessage('Intentando recuperar archivos...');
+        // Primero usar endpoint GET (idempotente) para obtener siempre urls
+        let resp = await fetch(`${API_BASE}/job-files/${currentJobId}`);
+        let data = await resp.json();
+        if (!(data && data.files && data.files.length)) {
+            // fallback a POST legacy
+            resp = await fetch(`${API_BASE}/regen-files/${currentJobId}`, {method:'POST'});
+            data = await resp.json();
+        }
+        if (data && data.files && data.files.length){
+            // Forzar un nuevo poll status para que el estado normal tenga download_urls
+            setTimeout(()=>{ checkStatus(); tryRefreshSaveAll(); }, 400);
+        } else {
+            injectRecoverButton();
+        }
+    } catch(e){
+        injectRecoverButton();
+    }
+}
+
+function injectRecoverButton(){
+    const container = document.getElementById('filesContainer');
+    if (!container) return;
+    container.style.display='block';
+    const list = document.getElementById('filesList');
+    if (!list) return;
+    if (list.querySelector('.recover-btn')) return; // evitar duplicados
+    const wrapper = document.createElement('div');
+    wrapper.style.padding='8px';
+    wrapper.style.background='#222';
+    wrapper.style.borderRadius='6px';
+    wrapper.style.fontSize='0.75rem';
+    wrapper.textContent='No se pudieron generar los enlaces de archivos. Pulsa para reintentar.';
+    const btn = document.createElement('button');
+    btn.textContent='🔄 Recuperar enlaces';
+    btn.className='mini-btn recover-btn';
+    btn.style.background='#6a1b9a';
+    btn.addEventListener('click', ()=>{
+        btn.disabled=true; btn.textContent='⏳';
+        attemptRegenLinks(lastStatusCache);
+        setTimeout(()=>{ btn.disabled=false; btn.textContent='🔄 Recuperar enlaces'; }, 3000);
+    });
+    wrapper.appendChild(document.createElement('br'));
+    wrapper.appendChild(btn);
+    list.appendChild(wrapper);
+}
+
+function tryRefreshSaveAll(){
+    const saveAllBtn = document.getElementById('saveAllBtn');
+    if (!saveAllBtn) return;
+    if (lastStatusCache && lastStatusCache.download_urls && lastStatusCache.download_urls.length){
+        saveAllBtn.disabled = false;
+        if (!saveAllBtn.textContent.includes('Guardar')) {
+            saveAllBtn.textContent='💾 Guardar todos en carpeta...';
+        }
+    }
 }
 
 async function autoSaveAndCleanup(status) {
