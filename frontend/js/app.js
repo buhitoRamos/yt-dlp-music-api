@@ -320,15 +320,15 @@ document.addEventListener('change', function(e){
         const fmt = e.target.value;
         const wrapper = document.getElementById('qualityWrapper');
         if (!wrapper) return;
-        if (fmt === 'mp4') {
+        const q = document.getElementById('quality');
+        // Desactivar calidad tanto para mp4 como para bestaudio (no aplica transcode)
+        if (fmt === 'mp4' || fmt === 'bestaudio') {
             wrapper.style.opacity = '0.35';
             wrapper.style.pointerEvents = 'none';
-            const q = document.getElementById('quality');
             if (q) q.setAttribute('disabled','disabled');
         } else {
             wrapper.style.opacity = '1';
             wrapper.style.pointerEvents = 'auto';
-            const q = document.getElementById('quality');
             if (q) q.removeAttribute('disabled');
         }
     }
@@ -351,8 +351,12 @@ function updateStatusDisplay(status) {
         case 'completado':
             showStatus('success', '✅ Descarga completada');
             setProgress(100);
+            // Mostrar archivos si existen; si aún no se detectaron pero hay download_urls, forzar contenedor con nombres genéricos
             if (status.files && status.files.length > 0) {
                 showFiles(status.files);
+            } else if (status.download_urls && status.download_urls.length > 0) {
+                const synthetic = status.download_urls.map((u,i)=>`archivo_${i+1}`);
+                showFiles(synthetic);
             }
             // Ya no mostramos el selector de carpeta: usamos enlaces directos de descarga
             const chooser = document.getElementById('folderChooserWrapper');

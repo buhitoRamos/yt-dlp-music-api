@@ -597,6 +597,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         # Formato/naming (agrega bestaudio). En SPEED_MODE mp3 => bestaudio
         original_request_format = format_type
         if format_type == 'bestaudio':
+            # bestaudio directo (sin transcodificar)
             cmd.extend(['-f','bestaudio'])
         elif format_type == 'mp3':
             if speed_mode:
@@ -968,6 +969,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Configurar formato (mantener configuración original)
                 if format_type == 'mp3':
                     cmd_retry.extend(['-x', '--audio-format', 'mp3', '--audio-quality', quality])
+                elif format_type == 'bestaudio':
+                    cmd_retry.extend(['-f', 'bestaudio'])
                 elif format_type == 'mp4':
                     cmd_retry.extend(['-f', 'best'])
                 else:
@@ -1148,7 +1151,8 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Usar siempre la ruta resuelta (por si ~ fue expandido)
                 resolved_dir = DOWNLOADS_STATUS[job_id].get('resolved_output_dir', output_dir)
                 final_listing = set(os.listdir(resolved_dir))
-                new_files = [f for f in final_listing - initial_files_snapshot if f.lower().endswith(('.mp3','.mp4','.webm','.m4a','.info.json'))]
+                # Incluir extensiones típicas de bestaudio (opus puede venir como .opus o .webm)
+                new_files = [f for f in final_listing - initial_files_snapshot if f.lower().endswith(('.mp3','.mp4','.webm','.m4a','.opus','.info.json'))]
                 # Priorizar: audio/video principal primero, luego info.json
                 def sort_key(name):
                     if name.endswith('.info.json'): return (2, name)
@@ -1156,12 +1160,26 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     return (1, name)
                 new_files.sort(key=sort_key)
                 downloaded_files = [os.path.join(resolved_dir, f) for f in new_files]
+                # Fallback: si no se detectaron archivos nuevos pero stdout contiene rutas destino, intentar parsear
+                if not downloaded_files:
+                    try:
+                        import re
+                        dest_pattern = re.compile(r"Destination: (.+)\n")
+                        matches = dest_pattern.findall(stdout)
+                        for m in matches:
+                            m = m.strip()
+                            if os.path.exists(m) and m.lower().endswith(('.mp3','.mp4','.webm','.m4a','.opus')):
+                                downloaded_files.append(m)
+                        if downloaded_files:
+                            DOWNLOADS_STATUS[job_id]['parsed_from_stdout'] = True
+                    except Exception as _pe:
+                        DOWNLOADS_STATUS[job_id]['parse_stdout_error'] = str(_pe)
             except Exception as e:
                 DOWNLOADS_STATUS[job_id]['file_diff_error'] = str(e)
                 # Fallback a listado completo
                 try:
                     for file in os.listdir(resolved_dir):
-                        if file.endswith(('.mp3', '.mp4', '.webm', '.m4a')):
+                        if file.endswith(('.mp3', '.mp4', '.webm', '.m4a', '.opus')):
                             downloaded_files.append(os.path.join(resolved_dir, file))
                 except Exception:
                     pass
@@ -1179,6 +1197,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     CLIENT_CACHE[content_type] = chosen
                     DOWNLOADS_STATUS[job_id]['cached_saved'] = chosen
             
+            # Debug: listado final completo (limitado)
+            try:
+                DOWNLOADS_STATUS[job_id]['final_dir_listing'] = list(sorted(os.listdir(resolved_dir)))[:80]
+            except Exception:
+                pass
+
             DOWNLOADS_STATUS[job_id].update({
                 'status': 'completado',
                 'progress': 100,
