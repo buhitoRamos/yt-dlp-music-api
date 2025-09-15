@@ -9,6 +9,7 @@ let lastStatusCache = null;
 let pollTimer = null;
 const POLL_STEPS = [2000, 4000, 6000]; // escalado progresivo 2s -> 4s -> 6s
 let pollStepIndex = 0;
+let downloadStartTime = null;
 
 // Helper para pedir permisos explícitos si el navegador exige 'user activation'
 async function ensureDirectoryWritePermission() {
@@ -72,6 +73,7 @@ async function checkStatus() {
         if (done) {
             clearPolling();
             resetButton();
+            downloadStartTime = null; // Limpiar tiempo al finalizar
             return;
         }
         // Evolución del backoff
@@ -190,6 +192,18 @@ document.addEventListener('DOMContentLoaded', function() {
         
         const formData = new FormData(this);
         const data = Object.fromEntries(formData);
+        
+        // Debug: Verificar que se está tomando la URL correcta
+        const urlInput = document.getElementById('url');
+        console.log('URL desde input:', urlInput ? urlInput.value : 'Input no encontrado');
+        console.log('Data del formulario:', data);
+        
+        // Verificar que tenemos una URL
+        if (!data.url || data.url.trim() === '') {
+            showStatus('error', 'Por favor ingresa una URL válida');
+            return;
+        }
+        
         // Ajustes de formato/calidad: si formato es mp4 ignorar quality
         if (data.format === 'mp4') {
             delete data.quality; // backend puede usar mejor calidad por defecto para video
@@ -198,9 +212,23 @@ document.addEventListener('DOMContentLoaded', function() {
         const fl = document.getElementById('force_local'); // Puede no existir tras simplificación
         if (fl) data.force_local = fl.checked ? '1' : '0';
         
+        // Limpiar estado anterior y ocultar archivos de descargas previas
+        lastStatusCache = null;  // Limpiar caché de estado anterior
+        statusCache = {};        // Limpiar caché general
+        currentJobId = null;     // Resetear job ID actual
+        
+        // Ocultar contenedor de archivos de descargas anteriores
+        const filesContainer = document.getElementById('filesContainer');
+        if (filesContainer) {
+            filesContainer.style.display = 'none';
+        }
+        
         // Mostrar estado inicial
         showStatus('loading', 'Iniciando descarga...');
-        setProgress(0);
+        setProgress(0, {
+            task: 'Enviando solicitud al servidor...',
+            stats: 'Preparando descarga'
+        });
         clearFiles();
         hideLog();
         
@@ -224,6 +252,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (response.ok) {
                 currentJobId = result.job_id;
+                downloadStartTime = Date.now(); // Registrar tiempo de inicio
                 document.getElementById('jobInfo').textContent = `Job ID: ${currentJobId}`;
                 // Iniciar polling adaptativo
                 startAdaptivePolling();
@@ -250,6 +279,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 showStatus('info', '❌ Descarga cancelada por el usuario');
                 clearPolling();
                 currentJobId = null;
+                downloadStartTime = null; // Limpiar tiempo al cancelar
                 resetButton();
             } else {
                 showStatus('error', 'No se pudo cancelar la descarga');
@@ -280,48 +310,247 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
             }
+            
             try {
+                // Seleccionar carpeta
                 saveAllBtn.disabled = true;
-                const original = saveAllBtn.textContent;
-                saveAllBtn.textContent = '⏳ Preparando...';
+                saveAllBtn.textContent = '📁 Selecciona carpeta...';
                 const dirHandle = await window.showDirectoryPicker();
-                const delToggle = document.getElementById('deleteAfterDownload');
-                const deleteFlag = delToggle && delToggle.checked;
-                const urls = lastStatusCache.download_urls || [];
-                let ok=0, fail=0;
-                for (let i=0;i<urls.length;i++) {
-                    const url = urls[i] + (deleteFlag ? '?delete=1' : '');
-                    const baseServerPath = lastStatusCache.files[i];
-                    const fileName = baseServerPath.split('/').pop();
-                    saveAllBtn.textContent = `⬇️ ${i+1}/${urls.length}`;
-                    try {
-                        const resp = await fetch(url);
-                        if (!resp.ok) throw new Error(resp.status);
-                        const blob = await resp.blob();
-                        const fh = await dirHandle.getFileHandle(fileName, {create:true});
-                        const w = await fh.createWritable();
-                        await w.write(blob); await w.close();
-                        ok++;
-                    } catch(e) {
-                        console.warn('Falló', fileName, e);
-                        fail++;
-                    }
-                }
-                saveAllBtn.textContent = `✅ ${ok} guardados${fail? ' | '+fail+' errores':''}`;
-                if (deleteFlag && fail===0) {
-                    // Atenuar botones individuales ya que se borraron
-                    const list = document.getElementById('filesList');
-                    if (list) Array.from(list.querySelectorAll('button')).forEach(b=>{ b.disabled=true; b.style.opacity='0.4'; });
-                }
+                
+                // Comenzar descarga automáticamente
+                await downloadAllFiles(dirHandle, lastStatusCache, saveAllBtn);
+                
             } catch(err) {
-                console.warn(err);
-                saveAllBtn.textContent = '❌ Error';
-                setTimeout(()=>{ saveAllBtn.disabled=false; saveAllBtn.textContent='💾 Guardar todos en carpeta...'; }, 2000);
-                return;
+                if (err.name === 'AbortError') {
+                    saveAllBtn.textContent = '❌ Cancelado';
+                } else {
+                    console.warn(err);
+                    saveAllBtn.textContent = '❌ Error al seleccionar carpeta';
+                }
+                setTimeout(()=>{ 
+                    saveAllBtn.disabled = false; 
+                    saveAllBtn.textContent = '💾 Guardar todos en carpeta...'; 
+                }, 2000);
             }
         });
     }
 });
+
+// Función para descargar todos los archivos con manejo de errores y reintentos
+async function downloadAllFiles(dirHandle, statusCache, saveAllBtn) {
+    const delToggle = document.getElementById('deleteAfterDownload');
+    const deleteFlag = delToggle && delToggle.checked;
+    const urls = statusCache.download_urls || [];
+    const files = statusCache.files || [];
+    
+    let successful = [];
+    let failed = [];
+    let retryAvailable = false;
+    
+    // Primera pasada: intentar descargar todos los archivos
+    saveAllBtn.textContent = '⏳ Iniciando descargas...';
+    
+    for (let i = 0; i < urls.length; i++) {
+        const url = urls[i] + (deleteFlag ? '?delete=1' : '');
+        const baseServerPath = files[i];
+        const fileName = baseServerPath.split('/').pop();
+        
+        saveAllBtn.textContent = `⬇️ Descargando ${i + 1}/${urls.length}: ${fileName.substring(0, 20)}...`;
+        
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            
+            const blob = await resp.blob();
+            const fh = await dirHandle.getFileHandle(fileName, {create: true});
+            const w = await fh.createWritable();
+            await w.write(blob);
+            await w.close();
+            
+            successful.push({index: i, fileName, url});
+            
+        } catch(error) {
+            console.warn('Error descargando', fileName, error);
+            failed.push({index: i, fileName, url, error: error.message});
+        }
+        
+        // Pequeña pausa para evitar saturar el servidor
+        if (i < urls.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    
+    // Mostrar resultado inicial
+    if (failed.length === 0) {
+        // Todo exitoso
+        saveAllBtn.textContent = `✅ ${successful.length} archivos guardados`;
+        if (deleteFlag) {
+            // Atenuar botones individuales ya que se borraron del servidor
+            const list = document.getElementById('filesList');
+            if (list) {
+                Array.from(list.querySelectorAll('button')).forEach(b => {
+                    b.disabled = true;
+                    b.style.opacity = '0.4';
+                });
+            }
+        }
+        
+        setTimeout(() => {
+            saveAllBtn.disabled = false;
+            saveAllBtn.textContent = '💾 Guardar todos en carpeta...';
+        }, 3000);
+        
+    } else {
+        // Algunos fallaron - ofrecer reintento
+        retryAvailable = true;
+        const successText = successful.length > 0 ? `${successful.length} ok, ` : '';
+        saveAllBtn.textContent = `⚠️ ${successText}${failed.length} fallaron`;
+        
+        // Crear botón de reintento
+        createRetryInterface(dirHandle, failed, saveAllBtn, deleteFlag);
+    }
+}
+
+// Crear interfaz de reintento para archivos fallidos
+function createRetryInterface(dirHandle, failedFiles, saveAllBtn, deleteFlag) {
+    // Crear contenedor de reintentos si no existe
+    let retryContainer = document.getElementById('retryContainer');
+    if (!retryContainer) {
+        retryContainer = document.createElement('div');
+        retryContainer.id = 'retryContainer';
+        retryContainer.style.cssText = `
+            margin-top: 10px;
+            padding: 12px;
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        `;
+        
+        // Insertar después del contenedor de archivos
+        const filesContainer = document.getElementById('filesContainer');
+        filesContainer.parentNode.insertBefore(retryContainer, filesContainer.nextSibling);
+    }
+    
+    // Limpiar contenido previo
+    retryContainer.innerHTML = '';
+    
+    // Título
+    const title = document.createElement('div');
+    title.innerHTML = `<strong>⚠️ ${failedFiles.length} archivo(s) fallaron:</strong>`;
+    title.style.marginBottom = '8px';
+    retryContainer.appendChild(title);
+    
+    // Lista de archivos fallidos
+    const failedList = document.createElement('div');
+    failedList.style.cssText = 'margin-bottom: 10px; max-height: 120px; overflow-y: auto;';
+    
+    failedFiles.forEach(file => {
+        const fileDiv = document.createElement('div');
+        fileDiv.style.cssText = 'font-size: 0.8rem; color: #856404; margin: 2px 0;';
+        fileDiv.innerHTML = `• <strong>${file.fileName}</strong> - ${file.error}`;
+        failedList.appendChild(fileDiv);
+    });
+    
+    retryContainer.appendChild(failedList);
+    
+    // Botones de acción
+    const buttonsDiv = document.createElement('div');
+    buttonsDiv.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+    
+    // Botón de reintentar
+    const retryBtn = document.createElement('button');
+    retryBtn.textContent = '🔄 Reintentar fallidos';
+    retryBtn.className = 'mini-btn';
+    retryBtn.style.background = '#ff9f00';
+    retryBtn.style.color = 'white';
+    
+    retryBtn.addEventListener('click', async () => {
+        retryBtn.disabled = true;
+        retryBtn.textContent = '⏳ Reintentando...';
+        
+        let retrySuccessful = [];
+        let stillFailed = [];
+        
+        for (let i = 0; i < failedFiles.length; i++) {
+            const file = failedFiles[i];
+            
+            try {
+                const resp = await fetch(file.url);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                
+                const blob = await resp.blob();
+                const fh = await dirHandle.getFileHandle(file.fileName, {create: true});
+                const w = await fh.createWritable();
+                await w.write(blob);
+                await w.close();
+                
+                retrySuccessful.push(file);
+                
+            } catch(error) {
+                console.warn('Reintento falló para', file.fileName, error);
+                stillFailed.push({...file, error: error.message});
+            }
+            
+            // Pausa entre reintentos
+            if (i < failedFiles.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        }
+        
+        // Actualizar interfaz según resultado
+        if (stillFailed.length === 0) {
+            // Todos los reintentos exitosos
+            retryContainer.innerHTML = `
+                <div style="color: #155724; background: #d4edda; padding: 8px; border-radius: 4px;">
+                    ✅ <strong>¡Reintentos exitosos!</strong> ${retrySuccessful.length} archivo(s) guardado(s)
+                </div>
+            `;
+            
+            saveAllBtn.textContent = '✅ Todos los archivos guardados';
+            setTimeout(() => {
+                retryContainer.style.display = 'none';
+                saveAllBtn.disabled = false;
+                saveAllBtn.textContent = '💾 Guardar todos en carpeta...';
+            }, 3000);
+            
+        } else {
+            // Algunos siguen fallando
+            if (retrySuccessful.length > 0) {
+                const successDiv = document.createElement('div');
+                successDiv.style.cssText = 'color: #155724; background: #d4edda; padding: 6px; border-radius: 4px; margin-bottom: 8px;';
+                successDiv.innerHTML = `✅ ${retrySuccessful.length} archivo(s) guardado(s) en el reintento`;
+                retryContainer.insertBefore(successDiv, retryContainer.firstChild);
+            }
+            
+            // Recrear interfaz para los que siguen fallando
+            createRetryInterface(dirHandle, stillFailed, saveAllBtn, deleteFlag);
+        }
+    });
+    
+    // Botón de ignorar
+    const ignoreBtn = document.createElement('button');
+    ignoreBtn.textContent = '❌ Ignorar fallidos';
+    ignoreBtn.className = 'mini-btn';
+    ignoreBtn.style.background = '#6c757d';
+    ignoreBtn.style.color = 'white';
+    
+    ignoreBtn.addEventListener('click', () => {
+        retryContainer.style.display = 'none';
+        saveAllBtn.disabled = false;
+        saveAllBtn.textContent = '💾 Guardar todos en carpeta...';
+    });
+    
+    buttonsDiv.appendChild(retryBtn);
+    buttonsDiv.appendChild(ignoreBtn);
+    retryContainer.appendChild(buttonsDiv);
+    
+    // Resetear el botón principal
+    setTimeout(() => {
+        saveAllBtn.disabled = false;
+        saveAllBtn.textContent = '💾 Guardar todos en carpeta...';
+    }, 1000);
+}
 
 // Toggle de calidad según formato
 document.addEventListener('change', function(e){
@@ -348,13 +577,116 @@ function updateStatusDisplay(status) {
     lastStatusCache = status; // cache
     switch (status.status) {
         case 'iniciando':
+            let initTask = 'Preparando descarga...';
+            let initStats = 'Configurando parámetros y validando URL';
+            
+            // Detectar tipo de contenido por URL
+            const formData = new FormData(document.getElementById('downloadForm'));
+            const url = formData.get('url') || '';
+            if (url) {
+                if (url.includes('/playlist?') || url.includes('list=')) {
+                    initTask = 'Preparando descarga de playlist...';
+                    initStats = 'Analizando contenido de la playlist';
+                } else if (url.includes('/shorts/')) {
+                    initTask = 'Preparando descarga de YouTube Short...';
+                    initStats = 'Configurando descarga de video corto';
+                } else if (url.includes('music.youtube.com')) {
+                    initTask = 'Preparando descarga desde YouTube Music...';
+                    initStats = 'Configurando descarga de música';
+                } else {
+                    initTask = 'Preparando descarga de video...';
+                    initStats = 'Configurando descarga de video individual';
+                }
+            }
+            
             showStatus('loading', 'Iniciando descarga...');
-            setProgress(0);
+            setProgress(5, {
+                task: initTask,
+                stats: initStats,
+                addTime: false
+            });
             break;
         
         case 'descargando':
-            showStatus('loading', 'Descargando archivos...');
-            setProgress(Math.min(50, status.progress || 50));
+            // Usar progreso real del backend si está disponible
+            let progressPercent = status.progress || 30;
+            let taskInfo = 'Descargando contenido...';
+            let statsInfo = '';
+            
+            // Información específica del progreso actual
+            if (status.current_file) {
+                taskInfo = status.current_file;
+            } else if (status.stage === 'metadata') {
+                taskInfo = 'Obteniendo información del contenido...';
+                progressPercent = Math.max(progressPercent, 10);
+            } else if (status.stage === 'playlist') {
+                taskInfo = `Procesando playlist: ${status.playlist_name || 'Lista de reproducción'}`;
+                progressPercent = Math.max(progressPercent, 15);
+            } else if (status.stage === 'playlist_item') {
+                taskInfo = `Descargando item ${status.current_item} de ${status.total_items}`;
+                progressPercent = status.progress || progressPercent;
+            } else if (status.is_playlist) {
+                taskInfo = 'Descargando playlist...';
+                if (status.prefetch_title) {
+                    taskInfo = `Playlist: ${status.prefetch_title.substring(0, 40)}...`;
+                }
+            } else if (status.prefetch_title) {
+                taskInfo = `Descargando: ${status.prefetch_title.substring(0, 50)}...`;
+            }
+            
+            // Estadísticas detalladas
+            const attempt = status.attempt || 1;
+            const maxAttempts = status.max_attempts || 2;
+            
+            let statsParts = [];
+            
+            // Información de progreso específica
+            if (status.total_size) {
+                statsParts.push(`📁 ${status.total_size}`);
+            }
+            if (status.speed) {
+                statsParts.push(`🚀 ${status.speed}`);
+            }
+            if (status.eta) {
+                statsParts.push(`⏱️ ${status.eta}`);
+            }
+            
+            // Información técnica
+            if (attempt > 1) {
+                statsParts.push(`🔄 Reintento ${attempt}/${maxAttempts}`);
+                if (status.error_type) {
+                    statsParts.push(`(${status.error_type})`);
+                }
+            } else {
+                statsParts.push(`Intento ${attempt}/${maxAttempts}`);
+            }
+            
+            if (status.anti_bot_level) {
+                statsParts.push(`Anti-bot: ${status.anti_bot_level}`);
+            }
+            
+            if (status.chosen_initial_client) {
+                statsParts.push(`Cliente: ${status.chosen_initial_client}`);
+            }
+            
+            statsInfo = statsParts.join(' • ');
+            
+            // Mostrar mensaje de estado específico
+            let statusMessage = 'Descargando archivos...';
+            if (status.current_item && status.total_items) {
+                statusMessage = `Descargando item ${status.current_item} de ${status.total_items}...`;
+            } else if (attempt > 1) {
+                statusMessage = `Reintentando descarga (${attempt}/${maxAttempts})...`;
+            } else if (status.stage === 'playlist') {
+                statusMessage = 'Procesando playlist...';
+            }
+            
+            showStatus('loading', statusMessage);
+            setProgress(Math.min(progressPercent, 99), {  // No llegar a 100% hasta completar
+                task: taskInfo,
+                stats: statsInfo
+            });
+            
             // Si ya hay archivos detectados (porque estaban en cache / ya descargados) mostrarlos de inmediato
             if (status.files && status.files.length > 0 && !document.getElementById('filesContainer').style.display.includes('block')) {
                 showFiles(status.files);
@@ -363,7 +695,19 @@ function updateStatusDisplay(status) {
         
         case 'completado':
             showStatus('success', '✅ Descarga completada');
-            setProgress(100);
+            let completedStats = '';
+            if (status.files && status.files.length > 0) {
+                completedStats = `${status.files.length} archivo(s) descargado(s)`;
+            }
+            if (status.reused_existing) {
+                completedStats += ' (reutilizado archivo existente)';
+            }
+            
+            setProgress(100, {
+                task: 'Descarga finalizada exitosamente',
+                stats: completedStats
+            });
+            
             // Mostrar archivos si existen; si aún no se detectaron pero hay download_urls, forzar contenedor con nombres genéricos
             if (status.files && status.files.length > 0) {
                 showFiles(status.files);
@@ -381,10 +725,23 @@ function updateStatusDisplay(status) {
                 showLog(status.stdout);
             }
             break;
+            
         case 'saltado':
             // Estado cuando se evitó re-descargar porque ya existía en archive o reuse_existing
             showStatus('info', '⚠️ Ya estaba descargado (saltado)');
-            setProgress(100);
+            let skippedStats = '';
+            if (status.files && status.files.length > 0) {
+                skippedStats = `${status.files.length} archivo(s) encontrado(s)`;
+            }
+            if (status.already_downloaded) {
+                skippedStats += ' (ya en archivo de descargas)';
+            }
+            
+            setProgress(100, {
+                task: 'Contenido ya disponible - descarga omitida',
+                stats: skippedStats
+            });
+            
             if (status.files && status.files.length > 0) {
                 showFiles(status.files);
             } else if (status.download_urls && status.download_urls.length > 0) {
@@ -398,7 +755,19 @@ function updateStatusDisplay(status) {
         
         case 'error':
             showStatus('error', `❌ Error: ${status.error}`);
-            setProgress(0);
+            let errorStats = '';
+            if (status.attempt) {
+                errorStats = `Falló en intento ${status.attempt}`;
+            }
+            if (status.error_type) {
+                errorStats += ` • Tipo: ${status.error_type}`;
+            }
+            
+            setProgress(0, {
+                task: 'Error durante la descarga',
+                stats: errorStats
+            });
+            
             if (status.stdout) {
                 showLog(`Error:\n${status.error}\n\nOutput:\n${status.stdout}`);
             }
@@ -406,7 +775,10 @@ function updateStatusDisplay(status) {
         
         case 'cancelado':
             showStatus('info', '❌ Descarga cancelada');
-            setProgress(0);
+            setProgress(0, {
+                task: 'Descarga cancelada por el usuario',
+                stats: 'Proceso interrumpido'
+            });
             break;
     }
     // Actualizar panel de estrategia
@@ -631,8 +1003,38 @@ function showStatus(type, text) {
 }
 
 // Configurar progreso
-function setProgress(percent) {
-    document.getElementById('progressFill').style.width = `${percent}%`;
+function setProgress(percent, details = null) {
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const downloadDetails = document.getElementById('downloadDetails');
+    const currentTask = document.getElementById('currentTask');
+    const downloadStats = document.getElementById('downloadStats');
+    
+    progressFill.style.width = `${percent}%`;
+    progressText.textContent = `${Math.round(percent)}%`;
+    
+    if (details) {
+        downloadDetails.style.display = 'block';
+        if (details.task) {
+            currentTask.textContent = details.task;
+        }
+        if (details.stats) {
+            let statsText = details.stats;
+            
+            // Agregar tiempo transcurrido si la descarga ha iniciado
+            if (downloadStartTime && (percent > 0 || details.addTime !== false)) {
+                const elapsed = Math.floor((Date.now() - downloadStartTime) / 1000);
+                const minutes = Math.floor(elapsed / 60);
+                const seconds = elapsed % 60;
+                const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                statsText += ` • Tiempo: ${timeStr}`;
+            }
+            
+            downloadStats.textContent = statsText;
+        }
+    } else {
+        downloadDetails.style.display = 'none';
+    }
 }
 
 // Mostrar archivos descargados
@@ -710,7 +1112,23 @@ function showFiles(files) {
 
 // Limpiar lista de archivos
 function clearFiles() {
-    document.getElementById('filesContainer').style.display = 'none';
+    const filesContainer = document.getElementById('filesContainer');
+    const filesList = document.getElementById('filesList');
+    
+    // Ocultar contenedor
+    filesContainer.style.display = 'none';
+    
+    // Limpiar contenido de la lista
+    if (filesList) {
+        filesList.innerHTML = '';
+    }
+    
+    // Limpiar también cualquier interfaz de reintento que pueda existir
+    const retryContainer = document.getElementById('retryContainer');
+    if (retryContainer) {
+        retryContainer.style.display = 'none';
+        retryContainer.innerHTML = '';
+    }
 }
 
 // Mostrar log
@@ -739,6 +1157,20 @@ function resetButton() {
 // Cleanup al cerrar la página
 window.addEventListener('beforeunload', function() {
     clearPolling();
+});
+
+// Inicialización del botón de descarga principal
+document.addEventListener('DOMContentLoaded', function() {
+    const downloadBtn = document.getElementById('downloadBtn');
+    const downloadForm = document.getElementById('downloadForm');
+    
+    // Asegurar que el botón funcione tanto por submit del form como por click directo
+    if (downloadBtn && downloadForm) {
+        downloadBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            downloadForm.dispatchEvent(new Event('submit'));
+        });
+    }
 });
 
 // Mostrar mensaje temporal

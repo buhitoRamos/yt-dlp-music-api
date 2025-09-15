@@ -3,20 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>yt-dlp Music Downloader</title>
+    <title>YouTube Music & Video Downloader</title>
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎵 Music Downloader</h1>
-            <p>Descarga música y playlists de YouTube Music fácilmente</p>
+            <h1>🎵 YouTube Music & Video Downloader</h1>
+            <p>Descarga música, videos, playlists y YouTube Shorts fácilmente</p>
             <p class="powered-by">Powered by Buh!to</p>
         </div>
         
         <div class="form-container">
             <div class="info-banner">
-                🛡️ <strong>Sistema Anti-Bloqueo Avanzado:</strong> Hasta 5 estrategias progresivas + detección automática de entorno para máxima compatibilidad
+                🛡️ <strong>Sistema Anti-Bloqueo Avanzado:</strong> Hasta 6 estrategias progresivas + detección automática de entorno para máxima compatibilidad<br>
+                📊 <strong>Capacidades:</strong> Playlists • Videos individuales • YouTube Shorts • YouTube Music • Múltiples formatos
             </div>
             
             <!-- Botón opcional para cargar cookies -->
@@ -44,14 +45,22 @@
 
             <form id="downloadForm">
                 <div class="form-group">
-                    <label for="url">🔗 URL de la playlist o video:</label>
+                    <label for="url">🔗 URL del contenido a descargar:</label>
                     <input 
                         type="url" 
                         id="url" 
                         name="url" 
                         required 
-                        placeholder="https://music.youtube.com/playlist?list=..."
+                        placeholder="Ej: playlist, video, YouTube Shorts, YouTube Music..."
                     >
+                    <small style="color:#666; font-size:0.8rem; margin-top:4px; display:block;">
+                        ✅ <strong>Compatible con:</strong> YouTube playlists • Videos individuales • YouTube Shorts • YouTube Music<br>
+                        📝 <strong>Ejemplos:</strong><br>
+                        • <code>youtube.com/playlist?list=...</code> (playlist completa)<br>
+                        • <code>youtube.com/watch?v=...</code> (video individual)<br>
+                        • <code>youtube.com/shorts/...</code> (YouTube Shorts)<br>
+                        • <code>music.youtube.com/...</code> (YouTube Music)
+                    </small>
                 </div>
 
                 <!-- Formato & Calidad (reintroducidos de forma simple) -->
@@ -59,24 +68,40 @@
                     <div style="flex:1 1 160px; min-width:140px;">
                         <label for="format">🎬 Formato:</label>
                         <select id="format" name="format" style="width:100%;">
-                            <option value="mp3" selected>Audio (MP3)</option>
-                            <option value="bestaudio">Audio rápido (sin convertir)</option>
-                            <option value="mp4">Video (MP4)</option>
+                            <option value="mp3" selected>🎵 Audio (MP3)</option>
+                            <option value="bestaudio">⚡ Audio rápido (sin convertir)</option>
+                            <option value="mp4">🎬 Video completo (MP4)</option>
                         </select>
                     </div>
                     <div id="qualityWrapper" style="flex:1 1 180px; min-width:160px;">
                         <label for="quality">🎚 Calidad (audio):</label>
                         <select id="quality" name="quality" style="width:100%;">
-                            <option value="320K" selected>320 kbps</option>
+                            <option value="320K" selected>320 kbps (Alta)</option>
                             <option value="256K">256 kbps</option>
-                            <option value="192K">192 kbps</option>
-                            <option value="128K">128 kbps</option>
+                            <option value="192K">192 kbps (Recomendado)</option>
+                            <option value="128K">128 kbps (Básica)</option>
                             <option value="best">Mejor disponible</option>
                         </select>
                     </div>
                     <div style="flex:1 1 220px; min-width:200px; font-size:0.72rem; line-height:1.15; color:#555; padding-top:4px;">
-                        <strong>Tip:</strong> MP3 192k es óptimo. "Audio rápido" evita conversión (más veloz). MP4 ignora calidad de audio.
+                        <strong>💡 Consejos:</strong><br>
+                        • <strong>MP3 192k</strong>: equilibrio perfecto calidad/tamaño<br>
+                        • <strong>"Audio rápido"</strong>: sin conversión (más veloz)<br>
+                        • <strong>MP4</strong>: incluye video completo (ignora calidad audio)<br>
+                        • <strong>Playlists</strong>: automáticamente detectadas y procesadas
                     </div>
+                </div>
+                
+                <!-- Opción de naming -->
+                <div class="form-group" style="margin-bottom:15px;">
+                    <label for="naming">📝 Formato de nombres de archivo:</label>
+                    <select id="naming" name="naming" style="width:100%;">
+                        <option value="title" selected>Solo título del video/canción</option>
+                        <option value="artist-title">Artista - Título (recomendado para música)</option>
+                    </select>
+                    <small style="color:#666; font-size:0.75rem; margin-top:4px; display:block;">
+                        Para música de YouTube Music se recomienda "Artista - Título" para mejor organización
+                    </small>
                 </div>
                 
                 <button type="submit" class="btn" id="downloadBtn">
@@ -109,6 +134,12 @@
                 
                 <div class="progress-bar">
                     <div class="progress-fill" id="progressFill"></div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                
+                <div id="downloadDetails" style="margin-top: 8px; font-size: 0.85rem; color: #555; display: none;">
+                    <div id="currentTask" style="font-weight: 500;"></div>
+                    <div id="downloadStats" style="font-size: 0.8rem; margin-top: 4px;"></div>
                 </div>
                 
                 <div id="jobInfo" style="margin-top: 10px; font-size: 0.9rem; color: #666;"></div>

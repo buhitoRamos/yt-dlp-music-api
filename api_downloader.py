@@ -200,6 +200,10 @@ def download():
     try:
         data = request.get_json()
         
+        # DEBUG: Verificar qué datos está recibiendo el servidor
+        print(f"🔍 [DEBUG] URL recibida en servidor: {data.get('url')}")
+        print(f"🔍 [DEBUG] Datos completos: {data}")
+        
         # Validar datos requeridos
         url = data.get('url')
         if not url:
@@ -1342,13 +1346,171 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
-                universal_newlines=True
+                universal_newlines=True,
+                bufsize=1  # Line buffered
             )
             
             # Guardar el proceso para poder cancelarlo
             DOWNLOADS_STATUS[job_id]['process'] = process
             
-            stdout, stderr = process.communicate()
+            # Monitorear progreso en tiempo real
+            stdout_lines = []
+            stderr_lines = []
+            
+            def parse_progress_line(line):
+                """Parsea líneas de yt-dlp para extraer progreso"""
+                try:
+                    line = line.strip()
+                    
+                    # [download]  45.2% of   12.34MiB at  234.56KiB/s ETA 00:23
+                    if '[download]' in line and '%' in line and 'of' in line:
+                        # Extraer porcentaje
+                        import re
+                        percentage_match = re.search(r'(\d+\.?\d*)%', line)
+                        if percentage_match:
+                            progress = float(percentage_match.group(1))
+                            
+                            # Extraer información adicional
+                            size_match = re.search(r'of\s+([0-9.]+\w+)', line)
+                            speed_match = re.search(r'at\s+([0-9.]+\w+/s)', line)
+                            eta_match = re.search(r'ETA\s+(\d+:\d+)', line)
+                            
+                            # Extraer nombre del archivo si está presente
+                            file_name = "Descargando archivo..."
+                            if ']' in line:
+                                after_bracket = line.split(']', 1)[-1].strip()
+                                # Buscar patrón: filename.ext: progress%
+                                name_match = re.search(r'^([^:]+\.(mp3|mp4|m4a|webm|opus)):', after_bracket)
+                                if name_match:
+                                    file_name = name_match.group(1)
+                            
+                            progress_info = {
+                                'progress': min(progress, 99),  # No llegar a 100% hasta terminar
+                                'current_file': file_name
+                            }
+                            
+                            if size_match:
+                                progress_info['total_size'] = size_match.group(1)
+                            if speed_match:
+                                progress_info['speed'] = speed_match.group(1)
+                            if eta_match:
+                                progress_info['eta'] = eta_match.group(1)
+                                
+                            return progress_info
+                    
+                    # [youtube] VideoID: Downloading webpage
+                    elif '[youtube]' in line and ('Downloading webpage' in line or 'Extracting URL' in line):
+                        video_id = ""
+                        if ':' in line:
+                            parts = line.split(':', 2)
+                            if len(parts) >= 2:
+                                video_id = parts[1].strip()
+                        
+                        return {
+                            'progress': 10,
+                            'current_file': f'Obteniendo información: {video_id[:11] if video_id else "video"}...',
+                            'stage': 'metadata'
+                        }
+                    
+                    # [youtube:tab] Extracting URL: playlist_url
+                    elif '[youtube:tab]' in line and 'Extracting URL' in line:
+                        return {
+                            'progress': 5,
+                            'current_file': 'Analizando playlist...',
+                            'stage': 'playlist'
+                        }
+                    
+                    # [download] Downloading playlist: PlaylistName
+                    elif '[download] Downloading playlist:' in line:
+                        playlist_name = line.split('Downloading playlist:')[-1].strip()
+                        return {
+                            'progress': 15,
+                            'current_file': f'Procesando playlist: {playlist_name}',
+                            'stage': 'playlist',
+                            'playlist_name': playlist_name
+                        }
+                    
+                    # [download] Downloading item 3 of 10
+                    elif '[download] Downloading item' in line and 'of' in line:
+                        match = re.search(r'item\s+(\d+)\s+of\s+(\d+)', line)
+                        if match:
+                            current_item = int(match.group(1))
+                            total_items = int(match.group(2))
+                            playlist_progress = (current_item / total_items) * 80 + 15  # 15% base + 80% para items
+                            
+                            return {
+                                'progress': min(playlist_progress, 95),
+                                'current_file': f'Descargando item {current_item} de {total_items}',
+                                'stage': 'playlist_item',
+                                'current_item': current_item,
+                                'total_items': total_items
+                            }
+                    
+                    # [info] VideoID: Downloading title
+                    elif '[info]' in line and ('Downloading' in line or 'Writing' in line):
+                        return {
+                            'progress': 20,
+                            'current_file': 'Procesando información del video...',
+                            'stage': 'info'
+                        }
+                    
+                    # Detectar nombres de archivos en cualquier línea que los contenga
+                    elif any(ext in line for ext in ['.mp3', '.mp4', '.m4a', '.webm', '.opus']):
+                        # Buscar patrón de archivo de audio/video
+                        import re
+                        file_match = re.search(r'([^/\\]+\.(mp3|mp4|m4a|webm|opus))', line)
+                        if file_match:
+                            filename = file_match.group(1)
+                            return {
+                                'progress': 25,
+                                'current_file': f'Procesando: {filename}',
+                                'stage': 'processing'
+                            }
+                
+                except Exception as e:
+                    print(f"❌ [DEBUG] Error parsing line: {e} - Line: {line[:100]}")
+                return None
+            
+            # Leer salida en tiempo real
+            while True:
+                # Leer stdout
+                stdout_line = process.stdout.readline()
+                if stdout_line:
+                    stdout_lines.append(stdout_line)
+                    print(f"📤 [STDOUT] {stdout_line.strip()}")  # Debug: todas las líneas
+                    progress_info = parse_progress_line(stdout_line)
+                    if progress_info:
+                        DOWNLOADS_STATUS[job_id].update(progress_info)
+                        print(f"📊 [DEBUG] Progreso actualizado: {progress_info}")
+                
+                # Leer stderr
+                stderr_line = process.stderr.readline()
+                if stderr_line:
+                    stderr_lines.append(stderr_line)
+                    print(f"📥 [STDERR] {stderr_line.strip()}")  # Debug: todas las líneas de error
+                    progress_info = parse_progress_line(stderr_line)
+                    if progress_info:
+                        DOWNLOADS_STATUS[job_id].update(progress_info)
+                        print(f"📊 [DEBUG] Progreso actualizado (stderr): {progress_info}")
+                
+                # Verificar si el proceso terminó
+                if process.poll() is not None:
+                    # Leer líneas restantes
+                    remaining_stdout = process.stdout.read()
+                    remaining_stderr = process.stderr.read()
+                    if remaining_stdout:
+                        stdout_lines.extend(remaining_stdout.splitlines(True))
+                    if remaining_stderr:
+                        stderr_lines.extend(remaining_stderr.splitlines(True))
+                    break
+                
+                # Verificar si fue cancelado
+                if process.returncode == -15:  # SIGTERM
+                    break
+            
+            # Unir todas las líneas para el manejo posterior
+            stdout = ''.join(stdout_lines)
+            stderr = ''.join(stderr_lines)
             
             # Verificar si fue cancelado
             if process.returncode == -15:  # SIGTERM
