@@ -572,6 +572,16 @@ document.addEventListener('change', function(e){
 
 // Actualizar visualización del estado
 function updateStatusDisplay(status) {
+    // DEBUG: Imprimir en consola el resolved_output_dir y archivos listados por el backend
+    if (status.resolved_output_dir) {
+        console.log('[DEBUG] resolved_output_dir:', status.resolved_output_dir);
+    }
+    if (status.final_dir_listing) {
+        console.log('[DEBUG] final_dir_listing:', status.final_dir_listing);
+    }
+    if (status.files) {
+        console.log('[DEBUG] files:', status.files);
+    }
     lastStatusCache = status; // cache
     switch (status.status) {
         case 'iniciando':
