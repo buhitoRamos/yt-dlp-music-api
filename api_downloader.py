@@ -317,6 +317,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             is_playlist = True
 
         # Si es playlist, extraer URLs y descargar en paralelo
+        # Si es playlist, extraer URLs y descargar en paralelo
         if is_playlist:
             playlist_urls = extract_playlist_urls(url)
             DOWNLOADS_STATUS[job_id]['playlist_urls_count'] = len(playlist_urls)
@@ -332,22 +333,30 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     print(f"[DIAG] yt-dlp dry-run stderr:\n{dry_proc.stderr}")
                 except Exception as diag_ex:
                     print(f"[DIAG] Error ejecutando dry-run yt-dlp: {diag_ex}")
-
-
-        # Si es playlist, extraer URLs y descargar en paralelo
-        if is_playlist:
-            playlist_urls = extract_playlist_urls(url)
+            
             if not playlist_urls:
                 DOWNLOADS_STATUS[job_id]['status'] = 'error'
                 DOWNLOADS_STATUS[job_id]['error'] = 'No se pudieron extraer los videos de la playlist.'
                 return
+            
             DOWNLOADS_STATUS[job_id]['playlist_count'] = len(playlist_urls)
             DOWNLOADS_STATUS[job_id]['playlist_urls'] = playlist_urls
 
-            # --- Descarga paralela ---
-            max_workers = 1  # Forzar descarga secuencial para diagnóstico en host remoto
-
-            results = [None] * len(playlist_urls)
+            # --- Configurar modo descarga: secuencial por defecto para estabilidad ---
+            use_sequential = os.environ.get('FORCE_SEQUENTIAL', '1') == '1'  # Por defecto secuencial
+            use_single_command = os.environ.get('USE_SINGLE_COMMAND', '1') == '1'  # Usar un solo comando yt-dlp para toda la playlist
+            
+            if use_single_command:
+                print(f"[PLAYLIST] Descargando playlist completa con un solo comando yt-dlp (modo clásico)")
+                # Usar el método original: un solo comando yt-dlp para toda la playlist
+                DOWNLOADS_STATUS[job_id]['download_mode'] = 'single_command_playlist'
+                # Continuar con el código normal de descarga (no como playlist individual)
+                is_playlist = False  # Tratar como descarga normal
+            else:
+                max_workers = 3 if use_sequential else min(3, len(playlist_urls))
+                print(f"[PLAYLIST] Procesando {len(playlist_urls)} URLs en modo {'secuencial' if use_sequential else f'paralelo ({max_workers} workers)'}")
+                
+                results = [None] * len(playlist_urls)
             files_downloaded = []
             progress_map = [0] * len(playlist_urls)
             # Nuevo: lista de progreso detallado por archivo
@@ -2101,23 +2110,6 @@ def get_environment_info():
         env_info['platform_detected'].append('Vercel')
     
     return jsonify(env_info)
-
-@app.route('/ffmpeg-version', methods=['GET'])
-def ffmpeg_version():
-    """Devuelve la versión de ffmpeg instalada en el host remoto."""
-    import subprocess
-    try:
-        proc = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=8)
-        result = {'ok': True, 'stdout': proc.stdout[:2000], 'stderr': proc.stderr[:2000], 'returncode': proc.returncode}
-        print(f"[FFMPEG-CHECK] Return code: {proc.returncode}")
-        print(f"[FFMPEG-CHECK] Stdout: {proc.stdout[:500]}")
-        if proc.stderr:
-            print(f"[FFMPEG-CHECK] Stderr: {proc.stderr[:500]}")
-        return result
-    except Exception as e:
-        error_result = {'ok': False, 'error': str(e)}
-        print(f"[FFMPEG-CHECK] Error: {e}")
-        return error_result
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
