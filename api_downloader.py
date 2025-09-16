@@ -271,7 +271,23 @@ def download():
         return jsonify({'error': str(e)}), 500
 
 def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None, force_local=False, force_remote=False, reuse_existing=False):
+    import concurrent.futures
     try:
+        def extract_playlist_urls(playlist_url):
+            """Extrae todas las URLs de una playlist usando yt-dlp --flat-playlist --print url"""
+            try:
+                cmd = [
+                    'python3', '-m', 'yt_dlp', '--flat-playlist', '--print', 'url', '--no-warnings', '--ignore-errors', playlist_url
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if proc.returncode == 0:
+                    urls = [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith('http')]
+                    return urls
+                else:
+                    return []
+            except Exception as e:
+                return []
+
         # Actualizar estado
         DOWNLOADS_STATUS[job_id]['status'] = 'descargando'
 
@@ -294,6 +310,117 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         video_id = extract_video_id(url)
         if video_id:
             DOWNLOADS_STATUS[job_id]['video_id_detected'] = video_id
+
+        # Detectar si es playlist
+        is_playlist = False
+        if 'list=' in url or '/playlist?' in url:
+            is_playlist = True
+
+
+        # Si es playlist, extraer URLs y descargar en paralelo
+        if is_playlist:
+            playlist_urls = extract_playlist_urls(url)
+            if not playlist_urls:
+                DOWNLOADS_STATUS[job_id]['status'] = 'error'
+                DOWNLOADS_STATUS[job_id]['error'] = 'No se pudieron extraer los videos de la playlist.'
+                return
+            DOWNLOADS_STATUS[job_id]['playlist_count'] = len(playlist_urls)
+            DOWNLOADS_STATUS[job_id]['playlist_urls'] = playlist_urls
+
+            # --- Descarga paralela ---
+            max_workers = 3  # Puedes ajustar este valor
+            results = [None] * len(playlist_urls)
+            files_downloaded = []
+            progress_map = [0] * len(playlist_urls)
+
+
+            def download_single(idx, video_url):
+                """Descarga un solo video/canción usando yt-dlp y actualiza progreso individual y nombre actual"""
+                import re
+                single_cmd = ['python3', '-m', 'yt_dlp']
+                if format_type == 'mp3':
+                    single_cmd += ['-x', '--audio-format', 'mp3', '--audio-quality', quality]
+                elif format_type == 'bestaudio':
+                    single_cmd += ['-f', 'bestaudio']
+                elif format_type == 'mp4':
+                    single_cmd += ['-f', 'best']
+                else:
+                    single_cmd += ['-f', 'best']
+                if naming == 'title':
+                    template = '%(title)s.%(ext)s'
+                elif naming == 'artist-title':
+                    template = '%(artist|uploader|Unknown)s - %(title)s.%(ext)s'
+                else:
+                    template = '%(title)s.%(ext)s'
+                output_template = os.path.join(output_dir, template)
+                single_cmd += ['-o', output_template]
+                if cookies_file and os.path.exists(cookies_file):
+                    single_cmd += ['--cookies', cookies_file]
+                archive_path = os.path.join(output_dir, '.downloaded.txt')
+                single_cmd += ['--download-archive', archive_path]
+                single_cmd.append(video_url)
+
+                # Progreso en tiempo real: leer stdout línea a línea
+                try:
+                    proc = subprocess.Popen(single_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1)
+                    current_filename = None
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line:
+                            break
+                        # Buscar nombre de archivo en la línea
+                        match = re.search(r'Destination: (.+\.(mp3|mp4|m4a|webm|opus))', line)
+                        if match:
+                            current_filename = match.group(1)
+                            DOWNLOADS_STATUS[job_id]['current_file'] = f"{current_filename} (descargando)"
+                        # Buscar progreso
+                        percent_match = re.search(r'(\d+\.?\d*)% of', line)
+                        if percent_match:
+                            progress_map[idx] = float(percent_match.group(1))
+                        # Actualizar progreso global
+                        completed = sum([1 for p in progress_map if p == 100])
+                        total = len(progress_map)
+                        percent = int((completed / total) * 100)
+                        DOWNLOADS_STATUS[job_id]['progress'] = percent
+                        if current_filename:
+                            DOWNLOADS_STATUS[job_id]['current_file'] = f"{current_filename} ({percent}%)"
+                    proc.wait()
+                    # Al terminar, marcar como 100%
+                    progress_map[idx] = 100
+                    # Buscar archivo descargado
+                    files = [f for f in os.listdir(output_dir) if f.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4'))]
+                    files_downloaded.append(files)
+                    return proc.returncode == 0
+                except Exception:
+                    progress_map[idx] = 100
+                    return False
+
+            # Lanzar descargas en paralelo
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {executor.submit(download_single, idx, vurl): idx for idx, vurl in enumerate(playlist_urls)}
+                total = len(playlist_urls)
+                completed = 0
+                while completed < total:
+                    done, _ = concurrent.futures.wait(future_to_idx, timeout=1, return_when=concurrent.futures.FIRST_COMPLETED)
+                    completed = sum([1 for p in progress_map if p == 100])
+                    # Actualizar progreso global
+                    percent = int((completed / total) * 100)
+                    DOWNLOADS_STATUS[job_id]['progress'] = percent
+                    DOWNLOADS_STATUS[job_id]['current_file'] = f"{completed}/{total} completados"
+                # Esperar a que terminen todos
+                concurrent.futures.wait(future_to_idx)
+
+            # Al finalizar, actualizar archivos descargados
+            all_files = []
+            for sublist in files_downloaded:
+                all_files.extend(sublist)
+            DOWNLOADS_STATUS[job_id].update({
+                'status': 'completado',
+                'progress': 100,
+                'files': [os.path.join(output_dir, f) for f in set(all_files)],
+                'playlist_parallel': True
+            })
+            return
 
         # Reusar archivos existentes sin re-descargar si reuse_existing=1
         if reuse_existing:
