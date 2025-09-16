@@ -1,12 +1,3 @@
-@app.route('/ffmpeg-version', methods=['GET'])
-def ffmpeg_version():
-    """Devuelve la versión de ffmpeg instalada en el host remoto."""
-    import subprocess
-    try:
-        proc = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=8)
-        return {'ok': True, 'stdout': proc.stdout[:2000], 'stderr': proc.stderr[:2000], 'returncode': proc.returncode}
-    except Exception as e:
-        return {'ok': False, 'error': str(e)}
 # -*- coding: utf-8 -*-
 from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
@@ -19,6 +10,7 @@ import time
 import random
 from datetime import datetime
 import re
+import concurrent.futures
 
 # Configuración
 DEFAULT_OUTPUT_DIR = "/Users/O002545/Music/playlist"
@@ -280,18 +272,6 @@ def download():
         return jsonify({'error': str(e)}), 500
 
 def download_worker(job_id, url, format_type, quality, naming, output_dir, cookies_file=None, force_local=False, force_remote=False, reuse_existing=False):
-        # --- Diagnóstico previo: ejecutar yt-dlp en modo dry-run para el primer video de la playlist y loguear resultado ---
-        if is_playlist and playlist_urls and len(playlist_urls) > 0:
-            dry_cmd = ['python3', '-m', 'yt_dlp', '--simulate', '--no-warnings', '--ignore-errors', playlist_urls[0]]
-            try:
-                print(f"[DIAG] Ejecutando dry-run yt-dlp: {' '.join(dry_cmd)}")
-                dry_proc = subprocess.run(dry_cmd, capture_output=True, text=True, timeout=60)
-                print(f"[DIAG] yt-dlp dry-run returncode: {dry_proc.returncode}")
-                print(f"[DIAG] yt-dlp dry-run stdout:\n{dry_proc.stdout}")
-                print(f"[DIAG] yt-dlp dry-run stderr:\n{dry_proc.stderr}")
-            except Exception as diag_ex:
-                print(f"[DIAG] Error ejecutando dry-run yt-dlp: {diag_ex}")
-    import concurrent.futures
     try:
         def extract_playlist_urls(playlist_url):
             """Extrae todas las URLs de una playlist usando yt-dlp --flat-playlist --print url"""
@@ -335,6 +315,23 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         is_playlist = False
         if 'list=' in url or '/playlist?' in url:
             is_playlist = True
+
+        # Si es playlist, extraer URLs y descargar en paralelo
+        if is_playlist:
+            playlist_urls = extract_playlist_urls(url)
+            DOWNLOADS_STATUS[job_id]['playlist_urls_count'] = len(playlist_urls)
+            
+            # --- Diagnóstico previo: ejecutar yt-dlp en modo dry-run para el primer video de la playlist y loguear resultado ---
+            if playlist_urls and len(playlist_urls) > 0:
+                dry_cmd = ['python3', '-m', 'yt_dlp', '--simulate', '--no-warnings', '--ignore-errors', playlist_urls[0]]
+                try:
+                    print(f"[DIAG] Ejecutando dry-run yt-dlp: {' '.join(dry_cmd)}")
+                    dry_proc = subprocess.run(dry_cmd, capture_output=True, text=True, timeout=60)
+                    print(f"[DIAG] yt-dlp dry-run returncode: {dry_proc.returncode}")
+                    print(f"[DIAG] yt-dlp dry-run stdout:\n{dry_proc.stdout}")
+                    print(f"[DIAG] yt-dlp dry-run stderr:\n{dry_proc.stderr}")
+                except Exception as diag_ex:
+                    print(f"[DIAG] Error ejecutando dry-run yt-dlp: {diag_ex}")
 
 
         # Si es playlist, extraer URLs y descargar en paralelo
@@ -2104,6 +2101,23 @@ def get_environment_info():
         env_info['platform_detected'].append('Vercel')
     
     return jsonify(env_info)
+
+@app.route('/ffmpeg-version', methods=['GET'])
+def ffmpeg_version():
+    """Devuelve la versión de ffmpeg instalada en el host remoto."""
+    import subprocess
+    try:
+        proc = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=8)
+        result = {'ok': True, 'stdout': proc.stdout[:2000], 'stderr': proc.stderr[:2000], 'returncode': proc.returncode}
+        print(f"[FFMPEG-CHECK] Return code: {proc.returncode}")
+        print(f"[FFMPEG-CHECK] Stdout: {proc.stdout[:500]}")
+        if proc.stderr:
+            print(f"[FFMPEG-CHECK] Stderr: {proc.stderr[:500]}")
+        return result
+    except Exception as e:
+        error_result = {'ok': False, 'error': str(e)}
+        print(f"[FFMPEG-CHECK] Error: {e}")
+        return error_result
 
 @app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
