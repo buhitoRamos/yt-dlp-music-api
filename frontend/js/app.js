@@ -195,8 +195,6 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Debug: Verificar que se está tomando la URL correcta
         const urlInput = document.getElementById('url');
-        console.log('URL desde input:', urlInput ? urlInput.value : 'Input no encontrado');
-        console.log('Data del formulario:', data);
         
         // Verificar que tenemos una URL
         if (!data.url || data.url.trim() === '') {

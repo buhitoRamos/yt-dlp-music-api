@@ -329,9 +329,16 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
 
             # --- Descarga paralela ---
             max_workers = 3  # Puedes ajustar este valor
+
             results = [None] * len(playlist_urls)
             files_downloaded = []
             progress_map = [0] * len(playlist_urls)
+            # Nuevo: lista de progreso detallado por archivo
+            parallel_progress = [
+                {'index': idx, 'progress': 0, 'current_file': None, 'status': 'pendiente'}
+                for idx in range(len(playlist_urls))
+            ]
+            DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
 
 
             def download_single(idx, video_url):
@@ -373,26 +380,36 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                         if match:
                             current_filename = match.group(1)
                             DOWNLOADS_STATUS[job_id]['current_file'] = f"{current_filename} (descargando)"
+                            parallel_progress[idx]['current_file'] = current_filename
+                            parallel_progress[idx]['status'] = 'descargando'
                         # Buscar progreso
                         percent_match = re.search(r'(\d+\.?\d*)% of', line)
                         if percent_match:
                             progress_map[idx] = float(percent_match.group(1))
-                        # Actualizar progreso global
+                            parallel_progress[idx]['progress'] = float(percent_match.group(1))
+                        # Actualizar progreso global y paralelo
                         completed = sum([1 for p in progress_map if p == 100])
                         total = len(progress_map)
                         percent = int((completed / total) * 100)
                         DOWNLOADS_STATUS[job_id]['progress'] = percent
                         if current_filename:
                             DOWNLOADS_STATUS[job_id]['current_file'] = f"{current_filename} ({percent}%)"
+                        DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
                     proc.wait()
                     # Al terminar, marcar como 100%
                     progress_map[idx] = 100
+                    parallel_progress[idx]['progress'] = 100
+                    parallel_progress[idx]['status'] = 'completado' if proc.returncode == 0 else 'error'
+                    DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
                     # Buscar archivo descargado
                     files = [f for f in os.listdir(output_dir) if f.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4'))]
                     files_downloaded.append(files)
                     return proc.returncode == 0
                 except Exception:
                     progress_map[idx] = 100
+                    parallel_progress[idx]['progress'] = 100
+                    parallel_progress[idx]['status'] = 'error'
+                    DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
                     return False
 
             # Lanzar descargas en paralelo
