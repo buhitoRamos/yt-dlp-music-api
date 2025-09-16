@@ -371,10 +371,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 try:
                     proc = subprocess.Popen(single_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, bufsize=1)
                     current_filename = None
+                    stdout_lines = []
+                    stderr_lines = []
                     while True:
                         line = proc.stdout.readline()
                         if not line:
                             break
+                        stdout_lines.append(line)
                         # Buscar nombre de archivo en la línea
                         match = re.search(r'Destination: (.+\.(mp3|mp4|m4a|webm|opus))', line)
                         if match:
@@ -395,20 +398,28 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                         if current_filename:
                             DOWNLOADS_STATUS[job_id]['current_file'] = f"{current_filename} ({percent}%)"
                         DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
+                    # Leer stderr completo
+                    stderr_out, _ = proc.communicate()
+                    if stderr_out:
+                        stderr_lines.append(stderr_out)
                     proc.wait()
                     # Al terminar, marcar como 100%
                     progress_map[idx] = 100
                     parallel_progress[idx]['progress'] = 100
                     parallel_progress[idx]['status'] = 'completado' if proc.returncode == 0 else 'error'
+                    parallel_progress[idx]['stdout'] = ''.join(stdout_lines)[-2000:]
+                    parallel_progress[idx]['stderr'] = ''.join(stderr_lines)[-2000:]
+                    parallel_progress[idx]['returncode'] = proc.returncode
                     DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
                     # Buscar archivo descargado
                     files = [f for f in os.listdir(output_dir) if f.lower().endswith(('.mp3','.m4a','.opus','.webm','.mp4'))]
                     files_downloaded.append(files)
                     return proc.returncode == 0
-                except Exception:
+                except Exception as ex:
                     progress_map[idx] = 100
                     parallel_progress[idx]['progress'] = 100
                     parallel_progress[idx]['status'] = 'error'
+                    parallel_progress[idx]['error'] = str(ex)
                     DOWNLOADS_STATUS[job_id]['parallel_progress'] = parallel_progress
                     return False
 
