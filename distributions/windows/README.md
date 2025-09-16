@@ -1,7 +1,7 @@
 # YT-DLP Music API - Windows Distribution
 
 **Versión:** latest  
-**Generado:** 2025-09-16 12:23:41  
+**Generado:** 2025-09-16 12:28:19  
 **Plataforma:** Windows
 
 ## 🚀 Inicio Rápido

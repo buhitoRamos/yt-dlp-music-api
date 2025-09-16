@@ -1,7 +1,7 @@
 # YT-DLP Music API - Darwin Distribution
 
 **Versión:** latest  
-**Generado:** 2025-09-16 12:25:17  
+**Generado:** 2025-09-16 12:27:28  
 **Plataforma:** Darwin
 
 ## 🚀 Inicio Rápido

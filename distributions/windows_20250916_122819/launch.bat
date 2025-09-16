@@ -1,0 +1,6 @@
+@echo off
+echo Iniciando YT-DLP Music API...
+start "" "YT-DLP-Music-API.exe"
+timeout /t 3 /nobreak >nul
+echo Abriendo navegador en puerto 8080...
+start "" "http://localhost:8080"
