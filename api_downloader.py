@@ -328,7 +328,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             DOWNLOADS_STATUS[job_id]['playlist_urls'] = playlist_urls
 
             # --- Descarga paralela ---
-            max_workers = 3  # Puedes ajustar este valor
+            max_workers = 1  # Forzar descarga secuencial para diagnóstico en host remoto
 
             results = [None] * len(playlist_urls)
             files_downloaded = []
