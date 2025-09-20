@@ -45,15 +45,25 @@ def detect_python():
     return None
 
 def setup_virtual_env(python_cmd):
-    """Configura el entorno virtual."""
+    """Configura el entorno virtual con múltiples estrategias de fallback."""
     venv_path = Path(".venv")
     
     if not venv_path.exists():
         print("🔧 Creando entorno virtual...")
-        result = subprocess.run([python_cmd, "-m", "venv", ".venv"])
+        
+        # Estrategia 1: venv estándar
+        result = subprocess.run([python_cmd, "-m", "venv", ".venv"], 
+                              capture_output=True, text=True)
         if result.returncode != 0:
-            print("❌ Error creando entorno virtual")
-            return False
+            print("⚠️ venv estándar falló, intentando con --without-pip...")
+            
+            # Estrategia 2: venv sin pip (luego instalamos pip manualmente)
+            result = subprocess.run([python_cmd, "-m", "venv", "--without-pip", ".venv"], 
+                                  capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print("⚠️ venv también falló, usando instalación directa...")
+                return "direct", "direct"  # Usar instalación directa
     
     # Determinar el ejecutable de Python en el venv
     if platform.system() == "Windows":
@@ -63,18 +73,81 @@ def setup_virtual_env(python_cmd):
         python_venv = venv_path / "bin" / "python"
         pip_venv = venv_path / "bin" / "pip"
     
+    # Si no existe el python del venv, usar instalación directa
     if not python_venv.exists():
-        print("❌ Error: No se pudo crear el entorno virtual correctamente")
-        return False
+        print("⚠️ Entorno virtual no funciona, usando Python del sistema...")
+        return "direct", "direct"
     
-    return str(python_venv), str(pip_venv)
+    # Si no existe pip en el venv, intentar instalarlo
+    if not pip_venv.exists():
+        print("🔧 Instalando pip en entorno virtual...")
+        try:
+            # Descargar e instalar pip
+            import urllib.request
+            get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
+            get_pip_path = venv_path / "get-pip.py"
+            
+            urllib.request.urlretrieve(get_pip_url, get_pip_path)
+            subprocess.run([str(python_venv), str(get_pip_path)], 
+                         capture_output=True)
+            get_pip_path.unlink()  # Eliminar archivo temporal
+        except:
+            print("⚠️ No se pudo instalar pip, usando instalación directa...")
+            return "direct", "direct"
+    
+    if pip_venv.exists():
+        return str(python_venv), str(pip_venv)
+    else:
+        return "direct", "direct"
 
-def install_dependencies(pip_cmd):
-    """Instala las dependencias necesarias."""
+def install_dependencies(pip_cmd, python_cmd=None):
+    """Instala las dependencias necesarias con fallback a instalación directa."""
     dependencies = ["flask", "flask-cors", "yt-dlp"]
     
     print("📦 Verificando dependencias...")
     
+    # Si estamos en modo directo, usar el python del sistema
+    if pip_cmd == "direct":
+        print("💡 Usando instalación directa en el sistema...")
+        
+        # Verificar si ya están instaladas
+        try:
+            import flask, flask_cors
+            import yt_dlp
+            print("✅ Dependencias ya disponibles en el sistema")
+            return True
+        except ImportError:
+            pass
+        
+        # Intentar instalar con el python del sistema
+        if python_cmd:
+            print("📦 Instalando dependencias con pip del sistema...")
+            
+            # Intentar con --user primero
+            result = subprocess.run([python_cmd, "-m", "pip", "install", "--user"] + dependencies,
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print("✅ Dependencias instaladas correctamente (--user)")
+                return True
+            
+            # Si falla --user, intentar instalación normal
+            result = subprocess.run([python_cmd, "-m", "pip", "install"] + dependencies,
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print("✅ Dependencias instaladas correctamente")
+                return True
+            else:
+                print("❌ Error instalando dependencias")
+                print("💡 Posibles soluciones:")
+                print("   1. Ejecutar: python3 -m pip install --user flask flask-cors yt-dlp")
+                print("   2. Usar sudo: sudo python3 -m pip install flask flask-cors yt-dlp")
+                return False
+        
+        return False
+    
+    # Instalación normal con entorno virtual
     # Verificar si ya están instaladas
     try:
         result = subprocess.run([pip_cmd, "show"] + dependencies, 
@@ -147,14 +220,20 @@ def main():
     
     # Configurar entorno virtual
     venv_result = setup_virtual_env(python_cmd)
-    if not venv_result:
-        return 1
     
     python_venv, pip_venv = venv_result
     
     # Instalar dependencias
-    if not install_dependencies(pip_venv):
+    if not install_dependencies(pip_venv, python_cmd):
+        print("❌ No se pudieron instalar las dependencias")
+        print("💡 Soluciones posibles:")
+        print("   1. Ejecutar manualmente: python3 -m pip install --user flask flask-cors yt-dlp")
+        print("   2. Verificar conexión a internet")
+        print("   3. Verificar permisos de escritura")
         return 1
+    
+    # Determinar qué Python usar para ejecutar la aplicación
+    final_python = python_venv if python_venv != "direct" else python_cmd
     
     # Verificar FFmpeg
     check_ffmpeg()
@@ -163,13 +242,15 @@ def main():
     print("🚀 Iniciando servidor...")
     print("🌐 Servidor estará disponible en: http://localhost:8080")
     print("📱 Frontend: http://localhost:8080")
+    if python_venv == "direct":
+        print("⚠️ Ejecutando con Python del sistema (sin entorno virtual)")
     print("")
     print("⏹️ Presiona Ctrl+C para detener")
     print("")
     
     # Ejecutar la aplicación
     try:
-        result = subprocess.run([python_venv, "api_downloader.py"])
+        result = subprocess.run([final_python, "api_downloader.py"])
         return result.returncode
     except KeyboardInterrupt:
         print("\n🛑 Aplicación detenida por el usuario")

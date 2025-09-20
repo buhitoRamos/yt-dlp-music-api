@@ -115,6 +115,10 @@ test/testdata/thumbnails/foo\ %d\ bar/foo_%d.*
 yt-dlp.zip
 *.exe
 
+# Distributions (archivos grandes)
+distributions/*.zip
+distributions/*.tar.gz
+
 # Text Editor / IDE
 .idea
 *.iml
