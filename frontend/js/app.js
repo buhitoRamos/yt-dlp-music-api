@@ -332,6 +332,61 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+
+    // Manejar botón de shutdown
+    const shutdownBtn = document.getElementById('shutdownBtn');
+    if (shutdownBtn) {
+        shutdownBtn.addEventListener('click', async function() {
+            // Confirmar acción
+            const confirmation = confirm('¿Estás seguro de que deseas cerrar la aplicación?\n\nEsto cancelará cualquier descarga en curso y cerrará el servidor.');
+            if (!confirmation) return;
+
+            try {
+                shutdownBtn.disabled = true;
+                shutdownBtn.textContent = '🔄 Cerrando...';
+                
+                // Mostrar mensaje de despedida
+                showStatus('info', '🛑 Cerrando servidor...');
+                
+                // Limpiar polling si está activo
+                clearPolling();
+                
+                // Llamar al endpoint de shutdown
+                const response = await fetch(`${API_BASE}/shutdown`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    showStatus('success', `✅ ${result.message}`);
+                    
+                    // Mensaje final y cerrar pestaña después de unos segundos
+                    setTimeout(() => {
+                        alert('💤 Servidor cerrado exitosamente.\n\nEsta pestaña se cerrará automáticamente.');
+                        // Intentar cerrar la pestaña/ventana
+                        try {
+                            window.close();
+                        } catch (e) {
+                            // Si no se puede cerrar, redirigir a una página en blanco
+                            window.location.href = 'about:blank';
+                        }
+                    }, 2000);
+                } else {
+                    const error = await response.json();
+                    showStatus('error', `❌ Error al cerrar: ${error.error || 'Error desconocido'}`);
+                    shutdownBtn.disabled = false;
+                    shutdownBtn.textContent = '🔌 Cerrar App';
+                }
+            } catch (error) {
+                showStatus('error', `❌ Error de conexión: ${error.message}`);
+                shutdownBtn.disabled = false;
+                shutdownBtn.textContent = '🔌 Cerrar App';
+            }
+        });
+    }
 });
 
 // Función para descargar todos los archivos con manejo de errores y reintentos

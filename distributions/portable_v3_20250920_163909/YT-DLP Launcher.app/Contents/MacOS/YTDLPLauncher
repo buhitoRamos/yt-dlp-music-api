@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# YT-DLP Music API Launcher para macOS
+# Desarrollado por Martin Gaston Lopez
+
+# Obtener el directorio base (3 niveles arriba desde MacOS)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" && pwd)"
+
+# Cambiar al directorio de la aplicación
+cd "$SCRIPT_DIR"
+
+# Ejecutar con osascript para crear una nueva ventana de Terminal
+osascript -e '
+tell application "Terminal"
+    activate
+    do script "
+        clear
+        echo \"╔══════════════════════════════════════════════════════╗\"
+        echo \"║  🎵 YT-DLP Music API v3.0 - Launcher para macOS      ║\"
+        echo \"║     Desarrollado por Martin Gaston Lopez             ║\"
+        echo \"╚══════════════════════════════════════════════════════╝\"
+        echo \"\"
+        echo \"🔄 Iniciando aplicación...\"
+        echo \"📁 Directorio: '"$SCRIPT_DIR"'\"
+        echo \"\"
+        cd '"$SCRIPT_DIR"'
+        python3 launch_universal.py
+        echo \"\"
+        echo \"🔚 La aplicación se ha cerrado.\"
+        echo \"💡 Puedes cerrar esta ventana ahora.\"
+        echo \"\"
+        read -p \"Presiona ENTER para cerrar...\"
+    "
+end tell'

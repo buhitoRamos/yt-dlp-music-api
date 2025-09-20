@@ -31,6 +31,7 @@ body {
     padding: 30px;
     padding-bottom: 10px;
     text-align: center;
+    position: relative;
 }
 
 .header h1 {
@@ -41,6 +42,43 @@ body {
 .header p {
     font-size: 1.1rem;
     opacity: 0.9;
+}
+
+/* Botón de shutdown */
+.shutdown-container {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+}
+
+.shutdown-btn {
+    background: rgba(255, 255, 255, 0.2);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.shutdown-btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+    border-color: rgba(255, 255, 255, 0.5);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.shutdown-btn:active {
+    transform: translateY(0);
+}
+
+.shutdown-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
 }
 
 /* Formulario */

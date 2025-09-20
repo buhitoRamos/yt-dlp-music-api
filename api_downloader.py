@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 import subprocess
 import os
+import sys
 import json
 import tempfile
 import threading
@@ -11,6 +12,11 @@ import random
 from datetime import datetime
 import re
 import concurrent.futures
+import webbrowser
+import urllib.request
+import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
 
 # Configuración
 DEFAULT_OUTPUT_DIR = "/Users/O002545/Music/playlist"
@@ -27,7 +33,379 @@ CLIENT_CACHE = {}
 # Ruta de cookies cargadas en runtime (upload) opcional
 UPLOADED_COOKIES_PATH = None
 
+# Servidor HTTP simple para PyInstaller
+class SimpleHTTPHandler(BaseHTTPRequestHandler):
+    """Servidor HTTP simple compatible con PyInstaller"""
+    
+    def log_message(self, format, *args):
+        # Silenciar logs automáticos del servidor
+        pass
+    
+    def do_GET(self):
+        """Maneja peticiones GET"""
+        try:
+            if self.path == '/':
+                self.serve_file('frontend/index.html', 'text/html')
+            elif self.path.startswith('/css/'):
+                file_path = 'frontend' + self.path
+                self.serve_file(file_path, 'text/css')
+            elif self.path.startswith('/js/'):
+                file_path = 'frontend' + self.path
+                self.serve_file(file_path, 'application/javascript')
+            elif self.path.startswith('/status/'):
+                job_id = self.path.split('/')[-1]
+                self.handle_status(job_id)
+            elif self.path == '/formats':
+                self.handle_formats()
+            elif self.path == '/jobs':
+                self.handle_jobs()
+            elif self.path == '/environment':
+                self.handle_environment()
+            else:
+                self.send_error(404)
+        except Exception as e:
+            print(f"Error GET: {e}")
+            self.send_error(500)
+    
+    def do_POST(self):
+        """Maneja peticiones POST"""
+        try:
+            if self.path == '/download':
+                self.handle_download()
+            elif self.path == '/shutdown':
+                self.handle_shutdown()
+            elif self.path.startswith('/cancel/'):
+                job_id = self.path.split('/')[-1]
+                self.handle_cancel(job_id)
+            else:
+                self.send_error(404)
+        except Exception as e:
+            print(f"Error POST: {e}")
+            self.send_error(500)
+    
+    def do_OPTIONS(self):
+        """Maneja peticiones OPTIONS para CORS preflight"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+    
+    def serve_file(self, file_path, content_type):
+        """Sirve archivos estáticos"""
+        try:
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller
+                base_path = sys._MEIPASS
+            else:
+                # Desarrollo
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            full_path = os.path.join(base_path, file_path)
+            
+            with open(full_path, 'rb') as f:
+                content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', len(content))
+            self.end_headers()
+            self.wfile.write(content)
+        except FileNotFoundError:
+            self.send_error(404)
+    
+    def handle_status(self, job_id):
+        """Maneja /status/<job_id>"""
+        if job_id not in DOWNLOADS_STATUS:
+            self.send_json_response({'error': 'Job not found'}, 404)
+            return
+        
+        status = DOWNLOADS_STATUS[job_id].copy()
+        if 'process' in status:
+            del status['process']
+        
+        self.send_json_response(status)
+    
+    def handle_download(self):
+        """Maneja /download"""
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        
+        try:
+            data = json.loads(post_data.decode('utf-8'))
+        except:
+            self.send_json_response({'error': 'Invalid JSON'}, 400)
+            return
+        
+        # Validar datos requeridos
+        url = data.get('url')
+        if not url:
+            self.send_json_response({'error': 'URL requerida'}, 400)
+            return
+        
+        # Usar la función download simple (sin Flask)
+        response_data, status_code = download_simple(data)
+        self.send_json_response(response_data, status_code)
+    
+    def handle_shutdown(self):
+        """Maneja /shutdown"""
+        self.send_json_response({'message': 'Servidor cerrándose...'})
+        # Programar shutdown
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+    
+    def handle_cancel(self, job_id):
+        """Maneja /cancel/<job_id>"""
+        if job_id not in DOWNLOADS_STATUS:
+            self.send_json_response({'error': 'Job not found'}, 404)
+            return
+        
+        # Implementar lógica de cancelación
+        DOWNLOADS_STATUS[job_id]['status'] = 'cancelado'
+        self.send_json_response({'message': 'Descarga cancelada'})
+    
+    def handle_formats(self):
+        """Maneja /formats"""
+        formats_data = {
+            'formats': {
+                'mp3': 'Solo audio en formato MP3',
+                'mp4': 'Video completo en MP4',
+                'best': 'Mejor calidad disponible'
+            },
+            'qualities': {
+                '0': 'Mejor calidad (VBR)',
+                '320K': '320 kbps',
+                '256K': '256 kbps',
+                '192K': '192 kbps',
+                '128K': '128 kbps'
+            }
+        }
+        self.send_json_response(formats_data)
+    
+    def handle_jobs(self):
+        """Maneja /jobs"""
+        jobs_data = {
+            'jobs': list(DOWNLOADS_STATUS.keys()),
+            'total': len(DOWNLOADS_STATUS)
+        }
+        self.send_json_response(jobs_data)
+    
+    def handle_environment(self):
+        """Maneja /environment"""
+        env_data = {
+            'environment': 'compiled_executable',
+            'platform': sys.platform,
+            'python_version': sys.version.split(' ')[0]
+        }
+        self.send_json_response(env_data)
+    
+    def send_json_response(self, data, status_code=200):
+        """Envía respuesta JSON"""
+        json_data = json.dumps(data).encode('utf-8')
+        
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', len(json_data))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+        self.wfile.write(json_data)
+
+def download_endpoint(data):
+    """Función de descarga reutilizable"""
+    try:
+        # Reutilizar la lógica existente del endpoint /download
+        url = data.get('url')
+        format_type = data.get('format', 'mp3')
+        quality = data.get('quality', '0')
+        naming = data.get('naming', 'artist-title')
+        output_dir_raw = data.get('output_dir')
+        
+        if not output_dir_raw:
+            return jsonify({'error': 'output_dir es requerido'}), 400
+        
+        # Expandir ~ y variables de entorno
+        try:
+            expanded = os.path.expanduser(os.path.expandvars(output_dir_raw.strip()))
+            output_dir = expanded
+        except Exception:
+            return jsonify({'error': 'output_dir inválido'}), 400
+        
+        # Crear directorio si no existe
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            return jsonify({'error': 'No se pudo crear el directorio'}), 400
+        
+        # Generar ID único para el trabajo
+        job_id = f"job_{int(time.time())}_{len(DOWNLOADS_STATUS)}"
+        
+        # Inicializar estado
+        DOWNLOADS_STATUS[job_id] = {
+            'status': 'iniciando',
+            'url': url,
+            'created_at': datetime.now().isoformat(),
+            'progress': 0,
+            'files': [],
+            'error': None,
+            'requested_output_dir': output_dir_raw,
+            'resolved_output_dir': output_dir
+        }
+        
+        # Ejecutar descarga en hilo separado
+        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, None, False, False, False))
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': 'iniciado',
+            'message': f'Descarga iniciada. Usa /status/{job_id} para ver el progreso'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def download_simple(data):
+    """Función de descarga simple sin Flask - devuelve datos JSON puros"""
+    try:
+        # Reutilizar la misma lógica pero sin jsonify
+        url = data.get('url')
+        format_type = data.get('format', 'mp3')
+        quality = data.get('quality', '0')
+        naming = data.get('naming', 'artist-title')
+        output_dir_raw = data.get('output_dir')
+        
+        if not output_dir_raw:
+            return {'error': 'output_dir es requerido'}, 400
+        
+        # Expandir ~ y variables de entorno
+        try:
+            expanded = os.path.expanduser(os.path.expandvars(output_dir_raw.strip()))
+            output_dir = expanded
+        except Exception:
+            return {'error': 'output_dir inválido'}, 400
+        
+        # Crear directorio si no existe
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            return {'error': 'No se pudo crear el directorio'}, 400
+        
+        # Generar ID único para el trabajo
+        job_id = f"job_{int(time.time())}_{len(DOWNLOADS_STATUS)}"
+        
+        # Inicializar estado
+        DOWNLOADS_STATUS[job_id] = {
+            'status': 'iniciando',
+            'url': url,
+            'created_at': datetime.now().isoformat(),
+            'progress': 0,
+            'files': [],
+            'error': None,
+            'requested_output_dir': output_dir_raw,
+            'resolved_output_dir': output_dir
+        }
+        
+        # Ejecutar descarga en hilo separado
+        thread = threading.Thread(target=download_worker, args=(job_id, url, format_type, quality, naming, output_dir, None, False, False, False))
+        thread.daemon = True
+        thread.start()
+        
+        return {
+            'job_id': job_id,
+            'status': 'iniciado',
+            'message': f'Descarga iniciada. Usa /status/{job_id} para ver el progreso'
+        }, 200
+        
+    except Exception as e:
+        return {'error': str(e)}, 500
+
 # Inicializar aplicación Flask (fue removido accidentalmente en refactor)
+
+# === PATCH v3.0 PARA DISTRIBUCIÓN STANDALONE ===
+import platform
+
+def get_bundled_binary_path(binary_name):
+    """Obtener ruta de binarios incluidos en la distribución v3.0"""
+    import sys
+    import os
+    
+    if getattr(sys, 'frozen', False):
+        # Ejecutándose como ejecutable PyInstaller
+        if hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(sys.executable)
+    else:
+        # Ejecutándose como script Python normal
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    # Intentar diferentes ubicaciones
+    possible_paths = [
+        os.path.join(base_path, "binaries", binary_name),
+        os.path.join(base_path, binary_name),
+        os.path.join(os.path.dirname(base_path), "binaries", binary_name),
+    ]
+    
+    # Para Windows, agregar .exe si no está presente
+    if platform.system() == "Windows":
+        possible_paths.extend([
+            path + '.exe' for path in possible_paths if not path.endswith('.exe')
+        ])
+    
+    for binary_path in possible_paths:
+        if os.path.exists(binary_path):
+            print(f"✅ Binario encontrado: {binary_path}")
+            return binary_path
+    
+    # Fallback: buscar en PATH
+    import shutil
+    system_binary = shutil.which(binary_name)
+    if system_binary:
+        print(f"✅ Binario en PATH: {system_binary}")
+        return system_binary
+    
+    print(f"⚠️ Binario no encontrado: {binary_name}")
+    return None
+
+def setup_environment_v3():
+    """Configurar entorno para v3.0"""
+    global FFMPEG_PATH, FFPROBE_PATH
+    
+    print("🔧 Configurando entorno v3.0...")
+    
+    # Configurar rutas de ffmpeg al inicio
+    FFMPEG_PATH = get_bundled_binary_path('ffmpeg')
+    FFPROBE_PATH = get_bundled_binary_path('ffprobe')
+
+    if FFMPEG_PATH:
+        os.environ['FFMPEG_LOCATION'] = FFMPEG_PATH
+        print(f"✅ FFmpeg configurado: {FFMPEG_PATH}")
+    else:
+        print("⚠️ FFmpeg no encontrado")
+
+    if FFPROBE_PATH:
+        print(f"✅ FFprobe configurado: {FFPROBE_PATH}")
+    else:
+        print("⚠️ FFprobe no encontrado")
+    
+    # Configurar variables de entorno adicionales para Flask
+    if not os.environ.get('FLASK_ENV'):
+        os.environ['FLASK_ENV'] = 'production'
+    
+    # Desactivar el reloader en entorno compilado
+    if getattr(sys, 'frozen', False):
+        os.environ['WERKZEUG_RUN_MAIN'] = 'true'
+    
+    print("✅ Entorno v3.0 configurado")
+
+# Llamar setup al cargar
+setup_environment_v3()
+
+# === FIN PATCH v3.0 ===
+
+
 app = Flask(__name__)
 CORS(app)
 
@@ -845,11 +1223,12 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
         first_bot_trigger_attempt = None
 
         # Fast mode: si strong cookies en entorno remoto, habilitar ruta rápida
+        # DESHABILITADO: fast_mode puede causar que MP3 no se convierta
         fast_mode = False
-        if is_remote_server and cookies_strength == 'strong':
-            fast_mode = True
-            DOWNLOADS_STATUS[job_id]['fast_mode'] = True
-            DOWNLOADS_STATUS[job_id]['fast_mode_reason'] = 'strong_cookies_remote'
+        # if is_remote_server and cookies_strength == 'strong':
+        #     fast_mode = True
+        #     DOWNLOADS_STATUS[job_id]['fast_mode'] = True
+        #     DOWNLOADS_STATUS[job_id]['fast_mode_reason'] = 'strong_cookies_remote'
         DOWNLOADS_STATUS[job_id]['cookies_strength'] = cookies_strength
 
         # Formato/naming (agrega bestaudio). En SPEED_MODE mp3 => bestaudio
@@ -2062,6 +2441,34 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             'error_note': 'Excepción no controlada en download_worker'
         })
 
+@app.route('/formats', methods=['GET'])
+def api_formats():
+    """Obtener información de formatos disponibles"""
+    formats_data = {
+        'formats': {
+            'mp3': 'Solo audio en formato MP3',
+            'mp4': 'Video completo en MP4',
+            'best': 'Mejor calidad disponible'
+        },
+        'qualities': {
+            '0': 'Mejor calidad (VBR)',
+            '320K': '320 kbps',
+            '256K': '256 kbps',
+            '192K': '192 kbps',
+            '128K': '128 kbps'
+        }
+    }
+    return jsonify(formats_data)
+
+@app.route('/jobs', methods=['GET'])
+def api_jobs():
+    """Obtener lista de trabajos"""
+    jobs_data = {
+        'jobs': list(DOWNLOADS_STATUS.keys()),
+        'total': len(DOWNLOADS_STATUS)
+    }
+    return jsonify(jobs_data)
+
 @app.route('/environment', methods=['GET'])
 def get_environment_info():
     """Obtener información del entorno y estrategias aplicadas"""
@@ -2542,8 +2949,56 @@ def clear_jobs():
     DOWNLOADS_STATUS = {}
     return jsonify({'message': 'Historial de trabajos limpiado'})
 
+@app.route('/shutdown', methods=['POST'])
+def shutdown_server():
+    """Endpoint para cerrar el servidor de forma elegante"""
+    try:
+        print("🛑 Solicitud de apagado recibida desde el frontend")
+        
+        # Cancelar todas las descargas activas
+        cancelled_count = 0
+        for job_id, status in DOWNLOADS_STATUS.items():
+            if status.get('status') in ['descargando', 'preparando']:
+                try:
+                    if 'process' in status and status['process'] and status['process'].poll() is None:
+                        status['process'].terminate()
+                        status['status'] = 'cancelado'
+                        status['error'] = 'Servidor cerrándose'
+                        cancelled_count += 1
+                except:
+                    pass
+        
+        if cancelled_count > 0:
+            print(f"⚠️ Se cancelaron {cancelled_count} descargas activas")
+        
+        # Programar el apagado después de enviar la respuesta
+        def shutdown():
+            time.sleep(1)  # Dar tiempo para que la respuesta llegue al cliente
+            print("🔌 Cerrando servidor Flask...")
+            os._exit(0)  # Forzar salida del proceso
+        
+        # Ejecutar shutdown en un hilo separado
+        shutdown_thread = threading.Thread(target=shutdown)
+        shutdown_thread.daemon = True
+        shutdown_thread.start()
+        
+        return jsonify({
+            'message': '✅ Servidor cerrándose...',
+            'cancelled_downloads': cancelled_count
+        })
+        
+    except Exception as e:
+        print(f"❌ Error durante shutdown: {e}")
+        return jsonify({'error': f'Error durante shutdown: {str(e)}'}), 500
+
 if __name__ == '__main__':
     import os
+    import webbrowser
+    import threading
+    
+    # Detectar si estamos en un entorno compilado
+    is_compiled = getattr(sys, 'frozen', False)
+    print(f"🔍 Entorno: {'Compilado' if is_compiled else 'Desarrollo'}")
     
     print("🎵 API de descarga de música iniciada")
     print("📍 Endpoints disponibles:")
@@ -2551,6 +3006,7 @@ if __name__ == '__main__':
     print("   GET /status/<job_id> - Ver progreso")
     print("   GET /formats - Ver formatos disponibles")
     print("   GET /jobs - Listar trabajos")
+    print("   POST /shutdown - Cerrar servidor")
     
     # Puerto para producción (Heroku, Railway, etc.) o desarrollo
     port = int(os.environ.get('PORT', 8080))
@@ -2559,4 +3015,52 @@ if __name__ == '__main__':
     
     print(f"🌐 Servidor corriendo en {host}:{port}")
     
-    app.run(debug=debug, host=host, port=port)
+    # Función para abrir el navegador después de que el servidor esté listo
+    def open_browser():
+        time.sleep(2)  # Esperar 2 segundos para que el servidor esté completamente iniciado
+        browser_url = f"http://localhost:{port}"
+        print(f"🚀 Abriendo navegador en {browser_url}")
+        try:
+            webbrowser.open(browser_url)
+        except Exception as e:
+            print(f"⚠️ No se pudo abrir el navegador automáticamente: {e}")
+            print(f"💡 Abre manualmente: {browser_url}")
+    
+    # Solo abrir navegador en entorno local (no en producción)
+    if host in ['0.0.0.0', 'localhost', '127.0.0.1'] and not os.environ.get('RAILWAY_ENVIRONMENT'):
+        browser_thread = threading.Thread(target=open_browser)
+        browser_thread.daemon = True
+        browser_thread.start()
+    
+    # Fix para PyInstaller: detectar si estamos en un ejecutable compilado
+    is_compiled = getattr(sys, 'frozen', False)
+    
+    if is_compiled:
+        # Para ejecutables PyInstaller: usar servidor HTTP simple
+        print("🔧 Ejecutable detectado: usando servidor HTTP simple compatible")
+        try:
+            # Inicializar entorno v3.0 para ejecutables
+            setup_environment_v3()
+            
+            # Crear servidor HTTP simple
+            httpd = HTTPServer((host, port), SimpleHTTPHandler)
+            print(f"🚀 Servidor HTTP iniciado en http://{host}:{port}")
+            print("📱 Accede a http://localhost:8080 en tu navegador")
+            
+            # Servir indefinidamente
+            httpd.serve_forever()
+            
+        except Exception as e:
+            print(f"❌ Error con servidor HTTP simple: {e}")
+            print("💡 Verifica que el puerto 8080 esté disponible")
+    else:
+        # Para código fuente: usar Flask normal
+        try:
+            app.run(debug=debug, host=host, port=port, threaded=True, use_reloader=False)
+        except Exception as e:
+            print(f"❌ Error al iniciar servidor: {e}")
+            print("🔄 Intentando con configuración alternativa...")
+            try:
+                app.run(debug=False, host=host, port=port, threaded=True, use_reloader=False, use_debugger=False)
+            except Exception as e2:
+                print(f"❌ Error crítico: {e2}")

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Music & Video Downloader</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 YouTube Music & Video Downloader</h1>
+            <p>Descarga música, videos, playlists y YouTube Shorts fácilmente</p>
+            <p class="powered-by">Powered by Buh!to</p>
+            
+            <!-- Botón de apagado del servidor -->
+            <div class="shutdown-container">
+                <button type="button" id="shutdownBtn" class="shutdown-btn" title="Cerrar servidor y aplicación">
+                    🔌 Cerrar App
+                </button>
+            </div>
+        </div>
+        
+        <div class="form-container">
+            <div class="info-banner">
+                🛡️ <strong>Sistema Anti-Bloqueo Avanzado:</strong> Hasta 6 estrategias progresivas + detección automática de entorno para máxima compatibilidad<br>
+                📊 <strong>Capacidades:</strong> Playlists • Videos individuales • YouTube Shorts • YouTube Music • Múltiples formatos
+            </div>
+            
+            <!-- Botón opcional para cargar cookies -->
+            <div style="text-align:right; margin-bottom:12px;">
+                <button type="button" id="openCookies" class="mini-btn">🍪 Cargar Cookies</button>
+            </div>
+
+            <!-- Modal cookies -->
+            <div id="cookiesModal" class="modal" style="display:none;">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <strong>🍪 Cookies YouTube</strong>
+                        <button type="button" id="closeCookies" class="close-btn">✖</button>
+                    </div>
+                    <p style="font-size:0.7rem; line-height:1.2; margin:4px 0 6px;">Pega contenido Netscape exportado (.txt). Se usará para saltar verificaciones de bot.
+                        <br>Se guarda localmente en tu navegador.</p>
+                    <textarea id="cookieText" rows="6" placeholder="# Netscape HTTP Cookie File"></textarea>
+                    <div class="modal-actions">
+                        <button type="button" id="uploadCookiesBtn" class="mini-btn">⬆️ Guardar</button>
+                        <button type="button" id="clearCookiesBtn" class="mini-btn alt">🗑 Limpiar</button>
+                        <span id="cookiesStatus" class="cookies-status"></span>
+                    </div>
+                </div>
+            </div>
+
+            <form id="downloadForm">
+                <div class="form-group">
+                    <label for="url">🔗 URL del contenido a descargar:</label>
+                    <input 
+                        type="url" 
+                        id="url" 
+                        name="url" 
+                        required 
+                        placeholder="Ej: playlist, video, YouTube Shorts, YouTube Music..."
+                    >
+                    <small style="color:#666; font-size:0.8rem; margin-top:4px; display:block;">
+                        ✅ <strong>Compatible con:</strong> YouTube playlists • Videos individuales • YouTube Shorts • YouTube Music<br>
+                        📝 <strong>Ejemplos:</strong><br>
+                        • <code>youtube.com/playlist?list=...</code> (playlist completa)<br>
+                        • <code>youtube.com/watch?v=...</code> (video individual)<br>
+                        • <code>youtube.com/shorts/...</code> (YouTube Shorts)<br>
+                        • <code>music.youtube.com/...</code> (YouTube Music)
+                    </small>
+                </div>
+
+                <!-- Formato & Calidad (reintroducidos de forma simple) -->
+                <div class="form-row-inline" style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:10px;">
+                    <div style="flex:1 1 160px; min-width:140px;">
+                        <label for="format">🎬 Formato:</label>
+                        <select id="format" name="format" style="width:100%;">
+                            <option value="mp3" selected>🎵 Audio (MP3)</option>
+                            <option value="bestaudio">⚡ Audio rápido (sin convertir)</option>
+                            <option value="mp4">🎬 Video completo (MP4)</option>
+                        </select>
+                    </div>
+                    <div id="qualityWrapper" style="flex:1 1 180px; min-width:160px;">
+                        <label for="quality">🎚 Calidad (audio):</label>
+                        <select id="quality" name="quality" style="width:100%;">
+                            <option value="320K" selected>320 kbps (Alta)</option>
+                            <option value="256K">256 kbps</option>
+                            <option value="192K">192 kbps (Recomendado)</option>
+                            <option value="128K">128 kbps (Básica)</option>
+                            <option value="best">Mejor disponible</option>
+                        </select>
+                    </div>
+                    <div style="flex:1 1 220px; min-width:200px; font-size:0.72rem; line-height:1.15; color:#555; padding-top:4px;">
+                        <strong>💡 Consejos:</strong><br>
+                        • <strong>MP3 192k</strong>: equilibrio perfecto calidad/tamaño<br>
+                        • <strong>"Audio rápido"</strong>: sin conversión (más veloz)<br>
+                        • <strong>MP4</strong>: incluye video completo (ignora calidad audio)<br>
+                        • <strong>Playlists</strong>: automáticamente detectadas y procesadas
+                    </div>
+                </div>
+                
+                <!-- Opción de naming -->
+                <div class="form-group" style="margin-bottom:15px;">
+                    <label for="naming">📝 Formato de nombres de archivo:</label>
+                    <select id="naming" name="naming" style="width:100%;">
+                        <option value="title" selected>Solo título del video/canción</option>
+                        <option value="artist-title">Artista - Título (recomendado para música)</option>
+                    </select>
+                    <small style="color:#666; font-size:0.75rem; margin-top:4px; display:block;">
+                        Para música de YouTube Music se recomienda "Artista - Título" para mejor organización
+                    </small>
+                </div>
+                
+                <button type="submit" class="btn" id="downloadBtn">
+                    🚀 Iniciar Descarga
+                </button>
+                
+                <button type="button" class="btn btn-cancel" id="cancelBtn" style="display: none;">
+                    ❌ Cancelar Descarga
+                </button>
+
+                  <!-- Simplificado: un solo botón para elegir carpeta local (si el navegador lo soporta) -->
+                  <input type="hidden" id="output_dir" name="output_dir" value="~/Downloads/yt-dlp" />
+                  <div class="form-group" id="folderChooserWrapper" style="display:none;">
+                      <label>📁 Guardar localmente:</label>
+                      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                          <button type="button" class="folder-btn" id="pickLocalDirBtn" style="padding:6px 10px;">� Copiar a
+                              carpeta...</button>
+                          <span id="chosenFolderLabel" style="font-size:0.75rem; color:#555;">(aparecerá al completar la descarga)</span>
+                      </div>
+                      <small id="fsNote" style="color:#666; font-size:0.7rem; display:block; margin-top:4px;">Tras completarse podrás
+                          copiar y borrar del servidor. Si tu navegador no soporta elegir carpeta se mostrarán enlaces.</small>
+                  </div>
+            </form>
+            
+            <div id="statusContainer" class="status-container">
+                <div class="status">
+                    <div class="status-icon" id="statusIcon"></div>
+                    <strong id="statusText">Estado de descarga</strong>
+                </div>
+                
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                    <div class="progress-text" id="progressText">0%</div>
+                </div>
+                
+                <div id="downloadDetails" style="margin-top: 8px; font-size: 0.85rem; color: #555; display: none;">
+                    <div id="currentTask" style="font-weight: 500;"></div>
+                    <div id="downloadStats" style="font-size: 0.8rem; margin-top: 4px;"></div>
+                </div>
+                
+                <div id="jobInfo" style="margin-top: 10px; font-size: 0.9rem; color: #666;"></div>
+                <div id="strategyInfo" style="margin-top:6px; font-size:0.75rem; color:#444; display:none;"></div>
+                
+                <div id="filesContainer" class="files-list" style="display:none;">
+                    <strong>✅ Archivos listos (clic para descargar):</strong>
+                    <div style="margin:6px 0 10px; font-size:0.7rem; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <span style="color:#666;">Puedes desmarcar para conservar los archivos.</span>
+                        <button type="button" id="saveAllBtn" class="mini-btn" style="background:#4b4b9e; color:#fff;">💾 Guardar todos en carpeta...</button>
+                    </div>
+                    <div id="filesList"></div>
+                </div>
+                
+                <div id="logContainer" style="display: none;">
+                    <div class="log" id="logOutput"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
