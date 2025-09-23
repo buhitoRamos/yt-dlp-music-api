@@ -880,7 +880,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
 
         # Limpieza previa opcional de la carpeta destino (antes de snapshot) si PRE_CLEAN_OUTPUT=1
         # Seguridad: solo procede si el directorio existe, es realmente un directorio y no es raíz ni home.
-        pre_clean_flag = os.environ.get('PRE_CLEAN_OUTPUT','0') == '1'
+        pre_clean_flag = True
         if pre_clean_flag:
             # Nueva lógica: sólo borrar archivos cuya antigüedad > N horas (default 3)
             try:

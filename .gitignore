@@ -59,6 +59,7 @@ cookies
 *.webloc
 *.webm
 *.webp
+*.zip
 
 # Allow config/media files in testdata
 !test/**
@@ -118,6 +119,13 @@ yt-dlp.zip
 # Distributions (archivos grandes)
 distributions/*.zip
 distributions/*.tar.gz
+
+# Distribution folders (created by scripts)
+YT-DLP-Portable-*
+YT-DLP-Hybrid-*
+YT-DLP-SSL-*
+YT-DLP-Source-*
+*.zip
 
 # Text Editor / IDE
 .idea
