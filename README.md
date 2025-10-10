@@ -34,14 +34,59 @@ pip install flask flask-cors yt-dlp
 ```
 
 3. **Ejecutar la aplicación**:
+
+**Versión original**:
 ```bash
 python3 api_downloader.py
+```
+
+**Versión standalone simple (recomendada)**:
+```bash
+python3 api_downloader_simple.py
+```
+
+**Versión ultra simple (más confiable)**:
+```bash
+python3 api_downloader_minimal.py
 ```
 
 4. **Abrir en el navegador**:
 ```
 http://localhost:8080
 ```
+
+## 📦 Distribuciones Standalone
+
+Para evitar problemas de instalación de dependencias y Python, hemos creado versiones standalone:
+
+### 🚀 Versiones Disponibles
+
+- **`api_downloader_simple.py`**: Versión Flask optimizada con branding personalizado y bypass SSL
+- **`api_downloader_minimal.py`**: Versión ultra-confiable con servidor TCP puro (sin Flask)
+- **`api_downloader_standalone.py`**: Versión independiente con auto-instalación de dependencias
+
+### 🛠️ Crear Distribución Ejecutable
+
+Para crear ejecutables standalone sin requerir Python:
+
+```bash
+# Distribución híbrida (ejecutable + código fuente de respaldo)
+python3 create_hybrid_distribution.py
+
+# Distribución completa con binarios para todas las plataformas
+python3 create_portable_distribution.py
+
+# Distribución específica para problemas SSL en macOS
+python3 create_ssl_fixed_distribution.py
+```
+
+Estas distribuciones incluyen:
+- ✅ Ejecutables compilados para macOS y Windows
+- ✅ Binarios de `yt-dlp`, `ffmpeg` y `ffprobe`
+- ✅ Branding personalizado "YT-DLP-Portable-by-buho"
+- ✅ Interface web con marca "powered by buh!to"
+- ✅ Bypass automático de certificados SSL
+- ✅ Scripts de lanzamiento para diferentes sistemas
 
 ## 🎯 Uso
 
@@ -65,15 +110,26 @@ http://localhost:8080
 ## 📁 Estructura del Proyecto
 
 ```
-├── api_downloader.py      # API Flask principal
+├── api_downloader.py              # API Flask original
+├── api_downloader_simple.py       # Versión Flask optimizada (recomendada)
+├── api_downloader_minimal.py      # Versión ultra-confiable TCP
+├── api_downloader_standalone.py   # Versión con auto-instalación
+├── create_hybrid_distribution.py  # Crear distribución ejecutable+código
+├── create_portable_distribution.py # Crear distribución completa
+├── create_ssl_fixed_distribution.py # Crear distribución SSL-fixed
+├── build_standalone_v4.py         # Script de compilación PyInstaller
+├── auto_installer_v4.py           # Instalador automático de dependencias
 ├── frontend/
-│   ├── index.html        # Interfaz web
+│   ├── index.html                 # Interfaz web
 │   ├── css/
-│   │   └── styles.css    # Estilos responsivos
+│   │   └── styles.css            # Estilos responsivos
 │   └── js/
-│       └── app.js        # Lógica del frontend
-├── requirements.txt       # Dependencias Python
-└── README.md             # Documentación
+│       └── app.js                # Lógica del frontend
+├── binaries/                      # Binarios yt-dlp, ffmpeg, ffprobe
+│   ├── darwin/                   # Binarios para macOS
+│   └── windows/                  # Binarios para Windows
+├── requirements.txt               # Dependencias Python
+└── README.md                     # Documentación
 ```
 
 ## 🚀 Despliegue
