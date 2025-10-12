@@ -277,9 +277,11 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             """Extrae todas las URLs de una playlist usando yt-dlp --flat-playlist --print url"""
             try:
                 cmd = [
-                    'python3', '-m', 'yt_dlp', '--flat-playlist', '--print', 'url', '--no-warnings', '--ignore-errors', playlist_url
+                    'python3', '-m', 'yt_dlp', '--flat-playlist', '--print', 'url', '--no-warnings', '--ignore-errors',
+                    '--playlist-start', '1', '--playlist-end', '9999999',  # Asegurar que no hay límites
+                    playlist_url
                 ]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)  # Más tiempo para listas grandes
                 if proc.returncode == 0:
                     urls = [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith('http')]
                     return urls
@@ -346,6 +348,9 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             use_sequential = os.environ.get('FORCE_SEQUENTIAL', '1') == '1'  # Por defecto secuencial
             use_single_command = os.environ.get('USE_SINGLE_COMMAND', '1') == '1'  # Usar un solo comando yt-dlp para toda la playlist
             
+            # Inicializar max_workers siempre
+            max_workers = 3 if use_sequential else min(3, len(playlist_urls))
+            
             if use_single_command:
                 print(f"[PLAYLIST] Descargando playlist completa con un solo comando yt-dlp (modo clásico)")
                 # Usar el método original: un solo comando yt-dlp para toda la playlist
@@ -353,7 +358,6 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                 # Continuar con el código normal de descarga (no como playlist individual)
                 is_playlist = False  # Tratar como descarga normal
             else:
-                max_workers = 3 if use_sequential else min(3, len(playlist_urls))
                 print(f"[PLAYLIST] Procesando {len(playlist_urls)} URLs en modo {'secuencial' if use_sequential else f'paralelo ({max_workers} workers)'}")
                 
                 results = [None] * len(playlist_urls)
@@ -883,9 +887,14 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
             cmd.append('--no-playlist')
         else:
             if playlist_limit_env and playlist_limit_env.isdigit():
-                # Si es playlist, limitar el final
-                if is_playlist:
+                limit_value = int(playlist_limit_env)
+                # Si es playlist y límite > 0, limitar el final
+                if is_playlist and limit_value > 0:
                     cmd.extend(['--playlist-end', playlist_limit_env])
+            # Asegurar que no hay límites por defecto en yt-dlp para playlists
+            if is_playlist:
+                cmd.extend(['--playlist-start', '1'])  # Empezar desde el primero
+                cmd.extend(['--yes-playlist'])         # Forzar modo playlist
         
         # Agregar opciones adicionales (en fast_mode omitimos write-info-json para velocidad)
         if fast_mode:
@@ -1511,7 +1520,13 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                     if not is_playlist:
                         cmd_retry.append('--no-playlist')
                     elif playlist_limit_env and playlist_limit_env.isdigit():
-                        cmd_retry.extend(['--playlist-end', playlist_limit_env])
+                        limit_value = int(playlist_limit_env)
+                        if limit_value > 0:
+                            cmd_retry.extend(['--playlist-end', playlist_limit_env])
+                    # Asegurar que no hay límites por defecto en reintentos
+                    if is_playlist:
+                        cmd_retry.extend(['--playlist-start', '1'])
+                        cmd_retry.extend(['--yes-playlist'])
                 if os.environ.get('DOWNLOAD_ARCHIVE','0') == '1':
                     archive_path = os.path.join(output_dir, '.downloaded.txt')
                     cmd_retry.extend(['--download-archive', archive_path])
@@ -1620,7 +1635,7 @@ def download_worker(job_id, url, format_type, quality, naming, output_dir, cooki
                             playlist_progress = (current_item / total_items) * 80 + 15  # 15% base + 80% para items
                             
                             return {
-                                'progress': min(playlist_progress, 95),
+                                'progress': int(playlist_progress),
                                 'current_file': f'Descargando item {current_item} de {total_items}',
                                 'stage': 'playlist_item',
                                 'current_item': current_item,
